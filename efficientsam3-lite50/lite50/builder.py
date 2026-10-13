@@ -76,7 +76,7 @@ def make_lite50(model, config=Lite50Config(), initialize_text_from_dense=True):
 
 def build_lite50_image_model(*, checkpoint_path=None, lite_checkpoint_path=None,
                              device="cpu", eval_mode=True, config=Lite50Config(),
-                             strict_budget=True, initialize_text_from_dense=None,
+                             strict_budget=False, initialize_text_from_dense=None,
                              **compat):
     from sam3.model_builder import build_efficientsam3_image_model
     fixed = dict(backbone_type="repvit", model_name="m1.1",
