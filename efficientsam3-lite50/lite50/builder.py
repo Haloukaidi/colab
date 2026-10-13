@@ -6,10 +6,10 @@ from .modules import LiteProjectionHead, LiteFPNLevel, FactorizedTokenEmbedding
 
 @dataclass(frozen=True)
 class Lite50Config:
-    text_embedding_rank: int = 64
+    text_embedding_rank: int = 128  # default; set 96 or 64 for ablations
     text_attention_layers: int = 2
     vision_fusion_layers: int = 4
-    geometry_layers: int = 2
+    geometry_layers: int = 3  # preserve pretrained point/box encoder
     projection_mid_channels: int = 256
     parameter_budget: int = 50_000_000
 
@@ -61,7 +61,10 @@ def make_lite50(model, config=Lite50Config(), initialize_text_from_dense=True):
     for idx, layer in enumerate(fusion.layers):
         layer.layer_idx = idx
     geo = model.geometry_encoder
-    geo.encode = _prune(geo.encode, config.geometry_layers)
+    # Preserve the complete pretrained Geometry Encoder by default, including
+    # its existing ModuleList and state_dict layout. Geometry ablation is opt-in.
+    if config.geometry_layers != len(geo.encode):
+        geo.encode = _prune(geo.encode, config.geometry_layers)
     return model
 
 def build_lite50_image_model(*, checkpoint_path=None, lite_checkpoint_path=None,
