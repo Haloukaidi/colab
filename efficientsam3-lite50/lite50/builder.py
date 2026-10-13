@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from .modules import LiteProjectionHead, LiteFPNLevel, FactorizedTokenEmbedding
+from .fpn_optimization import enable_skip_unused_fpn
 
 @dataclass(frozen=True)
 class Lite50Config:
@@ -11,6 +12,7 @@ class Lite50Config:
     vision_fusion_layers: int = 4
     geometry_layers: int = 3  # preserve pretrained point/box encoder
     projection_mid_channels: int = 256
+    skip_unused_fpn_level: bool = True  # inference / training-identical output optimization
     parameter_budget: int = 50_000_000
 
 def num_params(module):
@@ -65,6 +67,11 @@ def make_lite50(model, config=Lite50Config(), initialize_text_from_dense=True):
     # its existing ModuleList and state_dict layout. Geometry ablation is opt-in.
     if config.geometry_layers != len(geo.encode):
         geo.encode = _prune(geo.encode, config.geometry_layers)
+
+    # Official VL backbone discards the smallest FPN scale (scalp=1).
+    # Skip computing that scale entirely while preserving all checkpoint keys.
+    if config.skip_unused_fpn_level:
+        enable_skip_unused_fpn(model.backbone)
     return model
 
 def build_lite50_image_model(*, checkpoint_path=None, lite_checkpoint_path=None,
