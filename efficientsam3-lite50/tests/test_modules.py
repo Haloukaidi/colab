@@ -3,9 +3,23 @@ import unittest
 import torch
 from torch import nn
 from lite50.modules import LiteProjectionHead, LiteFPNLevel, FactorizedTokenEmbedding
-from lite50.builder import _prune
+from lite50.builder import _prune, Lite50Config
 
 class TestModules(unittest.TestCase):
+    def test_v02_defaults(self):
+        config = Lite50Config()
+        self.assertEqual(config.text_embedding_rank, 128)
+        self.assertEqual(config.geometry_layers, 3)
+        self.assertEqual(config.parameter_budget, 50_000_000)
+
+    def test_rank_ablations(self):
+        vocab, dim = 49408, 512
+        for rank in (64, 96, 128):
+            m = FactorizedTokenEmbedding(vocab, dim, rank)
+            count = sum(p.numel() for p in m.parameters())
+            self.assertEqual(count, vocab * rank + rank * dim)
+        self.assertEqual(49408 * (128 - 64) + (128 - 64) * 512, 3_194_880)
+
     def test_projection(self):
         m = LiteProjectionHead().eval()
         with torch.no_grad():
