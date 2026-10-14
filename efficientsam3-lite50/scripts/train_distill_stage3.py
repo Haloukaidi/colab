@@ -1,4 +1,4 @@
-"""Launch upstream Stage3 Trainer: supervised Fusion by default, KD by opt-in config."""
+"""Launch upstream Stage3 Trainer: official-style SACap GT baseline by default."""
 import argparse
 import os
 from pathlib import Path
@@ -32,8 +32,8 @@ def main():
             "image_weight", "text_weight", "mask_kd_weight",
         )):
             raise ValueError("Supervised Fusion config must not declare teacher/KD settings")
-        if cfg.phase not in ("fusion1", "fusion2", "fusion4"):
-            raise ValueError("Supervised training only applies to Fusion stages")
+        if cfg.phase not in ("stage3", "fusion1", "fusion2", "fusion4"):
+            raise ValueError("Supervised Stage3 must be stage3 or an explicit Fusion ablation")
     elif builder == "lite50.stage3.build_stage3_distiller":
         if loss != "lite50.stage3.DistillationLoss":
             raise ValueError("Teacher KD requires DistillationLoss")
