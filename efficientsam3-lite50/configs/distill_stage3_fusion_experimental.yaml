@@ -1,0 +1,129 @@
+# OPTIONAL Lite50 gradual Fusion-unfreezing experiment; not official Stage3.
+# No teacher model is constructed. For optional SAM3 KD use distill_stage3_kd.yaml.
+paths:
+  dataset_root: /content/lite50_distill_mini_v1
+  prompt_manifest: /content/lite50_text16_v1/sacap_short_prompts.jsonl
+  rv_checkpoint: /content/drive/MyDrive/EfficientSAM3压缩/原始权重/efficientsam3_repvit.pt
+  lite_checkpoint: null  # REQUIRED: output of preceding SA-1B geometry or fusion phase
+  output: /content/lite50_distillation/fusion1
+phase: fusion1
+resolution: 1008
+epochs: 1
+accelerator: cuda
+workers: 2
+batch_size: 1
+limit: null
+prompt_mode: mixed
+include_unreviewed: false
+lr_projection_fpn: 0.0001
+# Keep the distilled text encoder frozen for the small reviewed SACap subset.
+lr_text: 0.00001
+lr_fusion: 0.00001
+
+matcher:
+  _target_: sam3.train.matcher.BinaryHungarianMatcherV2
+  focal: true
+  cost_class: 2.0
+  cost_bbox: 5.0
+  cost_giou: 2.0
+  alpha: 0.25
+  gamma: 2
+  stable: false
+
+trainer:
+  _target_: lite50.stage3.Lite50Trainer
+  mode: train_only
+  accelerator: ${accelerator}
+  max_epochs: ${epochs}
+  seed_value: 123
+  skip_first_val: true
+  skip_saving_ckpts: false
+  distributed:
+    find_unused_parameters: true
+    gradient_as_bucket_view: false
+  model:
+    _target_: lite50.stage3.build_stage3_supervised
+    rv_checkpoint: ${paths.rv_checkpoint}
+    lite_checkpoint: ${paths.lite_checkpoint}
+    phase: ${phase}
+    device: cpu
+  data:
+    train:
+      _target_: sam3.train.data.torch_dataset.TorchDataset
+      dataset:
+        _target_: lite50.train_data.SACapStage3Dataset
+        dataset_root: ${paths.dataset_root}
+        prompt_manifest: ${paths.prompt_manifest}
+        split: train
+        resolution: ${resolution}
+        prompt_mode: ${prompt_mode}
+        include_unreviewed: ${include_unreviewed}
+        limit: ${limit}
+      batch_size: ${batch_size}
+      num_workers: ${workers}
+      shuffle: true
+      pin_memory: true
+      drop_last: false
+      collate_fn:
+        _target_: sam3.train.data.collator.collate_fn_api
+        _partial_: true
+        repeats: 1
+        dict_key: all
+        with_seg_masks: true
+  loss:
+    all:
+      _target_: lite50.stage3.SupervisedLoss
+      supervised:
+        _target_: sam3.train.loss.sam3_loss.Sam3LossWrapper
+        normalization: global
+        matcher: ${matcher}
+        o2m_weight: 2.0
+        o2m_matcher:
+          _target_: sam3.train.matcher.BinaryOneToManyMatcher
+          alpha: 0.3
+          threshold: 0.4
+          topk: 4
+        use_o2m_matcher_on_o2m_aux: false
+        loss_fns_find:
+          - _target_: sam3.train.loss.loss_fns.Boxes
+            weight_dict: {loss_bbox: 5.0, loss_giou: 2.0}
+          - _target_: sam3.train.loss.loss_fns.IABCEMdetr
+            weak_loss: true  # SACap region phrases are not exhaustive class labels
+            weight_dict: {loss_ce: 20.0, presence_loss: 20.0}
+            pos_weight: 10.0
+            alpha: 0.25
+            gamma: 2
+            use_presence: true
+            pad_n_queries: 200
+          - _target_: sam3.train.loss.loss_fns.Masks
+            focal_alpha: 0.25
+            focal_gamma: 2.0
+            weight_dict: {loss_mask: 200.0, loss_dice: 10.0}
+            compute_aux: false
+        loss_fn_semantic_seg: null
+        scale_by_find_batch_size: true
+  optim:
+    amp: {enabled: false, amp_dtype: bfloat16}
+    optimizer: {_target_: torch.optim.AdamW, lr: 0.0001, weight_decay: 0.01}
+    gradient_clip: {_target_: sam3.train.optim.optimizer.GradientClipper, max_norm: 1.0}
+    param_group_modifiers: null
+    options:
+      lr:
+        - scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: 0.0}
+        - param_names: ['student.backbone.vision_backbone.trunk.model.head.*', 'student.backbone.vision_backbone.convs.*']
+          scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: '${lr_projection_fpn}'}
+        - param_names: ['student.backbone.language_backbone.*']
+          scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: '${lr_text}'}
+        - param_names: ['student.transformer.encoder.*']
+          scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: '${lr_fusion}'}
+  checkpoint:
+    save_dir: ${paths.output}/checkpoints
+    save_freq: 1
+    skip_saving_parameters: []
+    resume_from: null
+  logging:
+    log_dir: ${paths.output}/logs
+    log_freq: 1
+    tensorboard_writer: null
+    wandb_writer: null
+  meters: {}
