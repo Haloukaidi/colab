@@ -60,30 +60,90 @@ def build_stage3_distiller(rv_checkpoint, teacher_checkpoint, lite_checkpoint=No
     return model
 
 
-class DistillationLoss(nn.Module):
+class Lite50SupervisedModel(nn.Module):
+    """Student-only SAM3 PCS Stage3: no teacher, no feature/mask KD.
+
+    Keep the 'student.' state_dict prefix so the existing full checkpoint
+    importer, phase transitions and inference export remain compatible.
+    Official SAM3Image.forward performs GT Hungarian matching during training
+    and returns SAM3Output for the original Stage3 supervised loss.
+    SACap Stage3 uses text/box/text+box; point grounding is trained separately
+    by the preceding SA-1B geometry-KD phase.
+    """
+
+    def __init__(self, student, phase):
+        super().__init__()
+        self.student = student
+        self.provenance = {
+            "official_commit": OFFICIAL_COMMIT,
+            "phase": phase,
+            "objective": "supervised",
+            "context_length": 16,
+        }
+
+    def forward(self, batch):
+        return self.student(batch)
+
+    def back_convert(self, targets):
+        return self.student.back_convert(targets)
+
+
+def build_stage3_supervised(rv_checkpoint, lite_checkpoint=None,
+                            phase="fusion1", device="cpu"):
+    """Default Fusion recipe, matching EfficientSAM3's GT-supervised Stage3."""
+    if phase not in ("fusion1", "fusion2", "fusion4"):
+        raise ValueError("Supervised Stage3 phases are fusion1/fusion2/fusion4")
+    if not lite_checkpoint:
+        raise ValueError(
+            "Supervised Stage3 requires a Lite50 checkpoint from the preceding "
+            "text/geometry/fusion phase"
+        )
+    student = build_student(rv_checkpoint, lite_checkpoint, phase, device)
+    return Lite50SupervisedModel(student, phase)
+
+
+class SupervisedLoss(nn.Module):
+    """Upstream SAM3 Stage3 box/class/presence/focal-mask/Dice loss only.
+
+    On CPU, use the *official* PyTorch focal implementation rather than its
+    default GPU-only Triton kernel. On CUDA leave official behavior unchanged.
+    """
+
     def __init__(self, supervised):
         super().__init__()
         self.supervised = supervised
 
-    def forward(self, outputs, targets):
+    def _compute_supervised(self, outputs, targets):
         from sam3.train.loss import loss_fns
         first = next(iter(outputs))
         original = loss_fns.sigmoid_focal_loss
+
         def cpu_focal(*args, **kwargs):
             kwargs["triton"] = False
             return original(*args, **kwargs)
-        # Reuse upstream's own PyTorch implementation on CPU; its default
-        # Triton kernel requires a GPU even when Trainer accelerator='cpu'.
+
         context = (patch.object(loss_fns, "sigmoid_focal_loss", cpu_focal)
-                   if first["pred_masks"].device.type == "cpu" else contextlib.nullcontext())
+                   if first["pred_masks"].device.type == "cpu"
+                   else contextlib.nullcontext())
         with context:
-            losses = self.supervised(outputs, targets)
+            return self.supervised(outputs, targets)
+
+    def forward(self, outputs, targets):
+        if any("lite50_kd" in out for out in outputs):
+            raise ValueError("SupervisedLoss received KD predictions; use DistillationLoss")
+        return self._compute_supervised(outputs, targets)
+
+
+class DistillationLoss(SupervisedLoss):
+    """Optional KD ablation, retained for explicit experiments and geometry."""
+
+    def forward(self, outputs, targets):
+        losses = self._compute_supervised(outputs, targets)
         kd = [out["lite50_kd"] for out in outputs]
         losses["core_loss"] = losses["core_loss"] + sum(x["total"] for x in kd)
         for name in ("image_kd", "text_kd", "geometry_mask_kd", "teacher_mask_pairs"):
             losses[name] = sum(x[name].detach() for x in kd)
         return losses
-
 
 class Lite50Trainer(Trainer):
     def __init__(self, *, audit_updates=False, **kwargs):
@@ -118,16 +178,21 @@ class Lite50Trainer(Trainer):
         from .train_audit import fingerprints, frozen_keys, verify_update
         model = unwrap_ddp_if_wrapped(self.model)
         before, frozen = fingerprints(model.student), frozen_keys(model.student)
-        teacher_before = fingerprints(model.teacher)
+        teacher = getattr(model, "teacher", None)
+        teacher_before = fingerprints(teacher) if teacher is not None else None
         result = super().train_epoch(train_loader)
         audit = verify_update(model.student, before, frozen)
-        if fingerprints(model.teacher) != teacher_before or any(p.grad is not None for p in model.teacher.parameters()):
-            raise AssertionError("Teacher weights/buffers/gradients changed")
-        audit["teacher_frozen_unchanged"] = True
+        if teacher is not None:
+            if fingerprints(teacher) != teacher_before or any(p.grad is not None for p in teacher.parameters()):
+                raise AssertionError("Teacher weights/buffers/gradients changed")
+            audit["teacher_frozen_unchanged"] = True
+        else:
+            audit["teacher_forward_disabled"] = True
         audit["losses"] = {k: float(v) for k, v in result.items() if k.startswith("Losses/")}
         audit["learning_rates"] = [g["lr"] for g in self.optim.optimizer.param_groups]
-        if model.teacher_cache:
-            audit["teacher_cache"] = {"hits": model.teacher_cache.hits, "misses": model.teacher_cache.misses}
+        teacher_cache = getattr(model, "teacher_cache", None)
+        if teacher_cache:
+            audit["teacher_cache"] = {"hits": teacher_cache.hits, "misses": teacher_cache.misses}
         Path(self.logging_conf.log_dir, "update_audit.json").write_text(json.dumps(audit, indent=2))
         return result
 
@@ -139,7 +204,7 @@ class Lite50Trainer(Trainer):
         state = torch.load(ckpt_path, map_location="cpu", weights_only=True, mmap=True)
         current = unwrap_ddp_if_wrapped(self.model).provenance
         if state.get("lite50") != current:
-            raise ValueError("Resume requires matching phase/teacher/context/commit. "
-                             "For a new phase, use lite_checkpoint with a fresh output directory.")
+            raise ValueError("Resume requires matching objective/phase/teacher/context/commit. "
+                             "For a new phase or objective, use lite_checkpoint with a fresh output directory.")
         del state
         super()._load_resuming_checkpoint(ckpt_path)
