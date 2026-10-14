@@ -149,8 +149,8 @@ def matched_geometry_kd(student_out, teacher_out, targets, min_teacher_iou=0.3):
     return result["total_loss"], len(students)
 
 
-def geometry_prompt_from_find_stage(find_input, require_geometry=False):
-    """Build the real grounding Prompt, including point coordinates and labels.
+def unpack_find_stage_geometry(find_input, require_geometry=False):
+    """Validate and unpack normalized point/box tensors before SAM3 Prompt.
 
     The pinned official SAM3Image.forward() warns that PCS input_points are
     ignored. We call forward_grounding() directly, as Sam3Processor does.
@@ -158,8 +158,6 @@ def geometry_prompt_from_find_stage(find_input, require_geometry=False):
     while GeometryEncoder Prompt expects (N,B,2) and (N,B) labels. Boxes are
     already sequence-first: (N,B,4).
     """
-    from sam3.model.geometry_encoders import Prompt
-
     boxes = find_input.input_boxes
     box_labels = find_input.input_boxes_label
     box_mask = find_input.input_boxes_mask
@@ -193,10 +191,16 @@ def geometry_prompt_from_find_stage(find_input, require_geometry=False):
         if not has_boxes and not has_points:
             raise ValueError("Geometry phase requires a real, unmasked point or box prompt")
 
-    return Prompt(
+    return dict(
         box_embeddings=boxes, box_mask=box_mask, box_labels=box_labels,
         point_embeddings=points, point_mask=point_mask, point_labels=point_labels,
     )
+
+
+def geometry_prompt_from_find_stage(find_input, require_geometry=False):
+    """Use the real SAM3 GeometryEncoder path, not PCS's ignored input_points."""
+    from sam3.model.geometry_encoders import Prompt
+    return Prompt(**unpack_find_stage_geometry(find_input, require_geometry))
 
 
 class Lite50Distiller(nn.Module):
