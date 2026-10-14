@@ -17,10 +17,14 @@ the official checkout. Smoke tests establish update connectivity, not accuracy.
 | `fusion2` **(experimental)** | Same, with last 2 Fusion layers |
 | `fusion4` **(experimental)** | Same, with all 4 Fusion layers |
 
-RepViT, Geometry Encoder, Transformer Decoder, scoring and segmentation heads,
-and unused FPN 3 remain frozen. Frozen modules stay in evaluation mode, including
-BatchNorm running statistics. Their forward passes remain differentiable with
-respect to trainable upstream features; only teacher computation uses `no_grad`.
+RepViT stays frozen during `vision`, `text`, `geometry` and the optional
+Fusion experiments, but is **trainable in the official-style `stage3`**.
+The Geometry Encoder, Transformer Decoder, scoring/segmentation heads and
+unused FPN 3 remain frozen throughout. The Fusion Encoder is frozen in the
+official-style baseline and unfrozen only in named Fusion experiments.
+BatchNorm running statistics remain frozen. Frozen downstream modules remain
+differentiable with respect to trainable upstream activations; only KD teacher
+computation uses `no_grad`.
 
 The `geometry` phase comes **after text, before Stage3**, matching the official Stage1 Geometry Fine-tuning placement. It trains **one positive point OR one box** on SA-1B ground-truth regions (not repeated clicks and not SAM2 interaction). The official collator's point data are normalized `(x,y,label)`; the Lite50 adapter converts them to real `Prompt.point_embeddings`/`point_labels`/`point_mask` and calls `forward_grounding` directly. Official `SAM3Image.forward` otherwise warns that PCS ignores points. Box and point samples can coexist in the same batch, with an explicit 3-D point padding width rather than the PCS default of 257. The teacher and student receive exactly the same geometry. Supervised GT mask losses, image feature KD, and filtered teacher mask KD remain active. Geometry-only input uses the official `visual` text placeholder.
 
