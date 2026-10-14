@@ -16,7 +16,7 @@ limit: null
 prompt_mode: mixed
 include_unreviewed: false
 lr_projection_fpn: 0.0001
-lr_text: 0.00001
+# Keep the distilled text encoder frozen for the small reviewed SACap subset.
 lr_fusion: 0.00001
 
 matcher:
@@ -45,6 +45,7 @@ trainer:
     rv_checkpoint: ${paths.rv_checkpoint}
     lite_checkpoint: ${paths.lite_checkpoint}
     phase: ${phase}
+    train_text_in_fusion: false  # explicit true only for larger-data ablations
     device: cpu
   data:
     train:
@@ -111,8 +112,6 @@ trainer:
         - scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: 0.0}
         - param_names: ['student.backbone.vision_backbone.trunk.model.head.*', 'student.backbone.vision_backbone.convs.*']
           scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: '${lr_projection_fpn}'}
-        - param_names: ['student.backbone.language_backbone.*']
-          scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: '${lr_text}'}
         - param_names: ['student.transformer.encoder.*']
           scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: '${lr_fusion}'}
   checkpoint:
