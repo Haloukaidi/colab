@@ -1,0 +1,10 @@
+# Additional training/data requirements; install the pinned official package first.
+hydra-core
+omegaconf
+fvcore
+tensorboard
+torchmetrics
+triton; platform_system == "Linux"
+pyarrow
+pycocotools
+psutil

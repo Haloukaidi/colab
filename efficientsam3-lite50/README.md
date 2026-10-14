@@ -1,6 +1,6 @@
 # EfficientSAM3 RV-M Lite50 — experimental code overlay
 
-A **research prototype (not a trained checkpoint)** based on [EfficientSAM3](https://github.com/SimonZeng7108/efficientsam3). Current goal: **CPU inference speed versus segmentation accuracy**, retaining text/open-vocabulary and single point/box interfaces; 50M parameters is no longer a hard constraint. Using the pinned upstream commit, the user instantiated 100,828,102 teacher parameters and **56,413,638 student parameters**. Mask accuracy has **not** been recovered or validated.
+A **research prototype (not a trained checkpoint)** based on [EfficientSAM3](https://github.com/SimonZeng7108/efficientsam3). Current goal: **CPU inference speed versus segmentation accuracy**, retaining text/open-vocabulary and single point/box interfaces; 50M parameters is no longer a hard constraint. Using the pinned upstream commit, the RV-M baseline has 100,828,102 parameters and the student has **56,413,638 parameters**. Mask accuracy has **not** been recovered or validated.
 
 ## Architecture changes
 
@@ -16,7 +16,7 @@ A **research prototype (not a trained checkpoint)** based on [EfficientSAM3](htt
 | Geometry encoder | 3 layers | 3 (unchanged; point/box path preserved) |
 | Decoder, segmentation, scoring | original | unchanged |
 
-The modified Projection, FPN, and rank-128 token embedding reduce the model to **56.41M** actual instantiated parameters (CPU validation; upstream commit `bd0936c788fed8d51fa799437f05abd97b401b06`). Text and fusion layers are also pruned, while all three Geometry Encoder layers and their pretrained weights remain. In the preliminary untrained 2-thread CPU test, Lite50 gave roughly **1.7×** end-to-end speedup compared with the RV-M teacher over a small set of prompts; **this does not establish accuracy or target-device speed**. The unused-FPN optimization below does **not** change the 56.41M parameter count.
+The modified Projection, FPN, and rank-128 token embedding reduce the model to **56.41M** actual instantiated parameters (CPU validation; upstream commit `bd0936c788fed8d51fa799437f05abd97b401b06`). Text and fusion layers are also pruned, while all three Geometry Encoder layers and their pretrained weights remain. In the preliminary untrained 2-thread CPU test, Lite50 gave roughly **1.7×** end-to-end speedup compared with the RV-M baseline over a small set of prompts; **this does not establish accuracy or target-device speed**. The unused-FPN optimization below does **not** change the 56.41M parameter count.
 
 ## v0.2 decisions (2026-10-13)
 
@@ -69,7 +69,7 @@ model = build_lite50_image_model(
 )
 ```
 
-**Training is required**: New projection and FPN weights are not pretrained; MobileCLIP's low-rank embedding is approximate; text and fusion layers have been pruned (Geometry Encoder remains full-size). The fourth-FPN skip itself requires no retraining because the skipped output was already discarded. First distill visual and text features from the original full RV-M teacher, then fine-tune on text grounding plus box/point prompted masks. Upstream Stage3 by default freezes FPN and its checkpoint may omit FPN weights: update optimizer, freeze logic and `skip_saving_parameters` before training. Optional `scripts/integration_stage3.py` gives a reviewable patch, not a complete trainer.
+**Training is required**: New projection and FPN weights are not pretrained; MobileCLIP's low-rank embedding is approximate; text and fusion layers have been pruned (Geometry Encoder remains full-size). The fourth-FPN skip itself requires no retraining because the skipped output was already discarded. The current training teacher is **full SAM3 (`sam3.pt`)**; RV-M weights initialize the student. See [DISTILLATION.md](DISTILLATION.md) for Stage1 feature distillation, official Geometry mask losses, the Stage3 Trainer adapter, native SACap loading, staged freezing, optimizer coverage checks, and complete checkpoints. The previous partial `integration_stage3.py` source patch is retired.
 
 The text interface is `Sam3Processor.set_text_prompt`; box is `Sam3Processor.add_geometric_prompt([cx,cy,w,h], True, state)` (normalized), and point is `Sam3Processor.add_point_prompt([x,y], 1, state)` (pixel coordinates). **The separate optional SAM2 instance-interactive tracker is excluded from the 50M budget**. Do not claim open-vocabulary generalization until evaluated on held-out novel classes.
 
