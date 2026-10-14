@@ -64,7 +64,19 @@ layer-decay rule is applied to RepViT wrappers. Zero-LR groups are rejected.
 
 `SA1BGeometryStage3Dataset` reads all validated `manifests/geometry.jsonl` rows from mini-v1 (3,647 train, 402 val). Its `point` mode sends exactly one positive foreground point; `box` sends one mask-derived bounding box; `mixed` alternates by sample index and epoch. Official mask decoder, synchronized 1008-square image/mask/point/box transforms, and SAM3 Stage3 collator are reused. These inputs train the point and box *grounding* path only; they do not implement iterative SAM2 mask correction. Positive+negative or multiple points are supported by the lower-level Prompt representation but are not yet covered by this one-point curriculum and require later training/validation.
 
-Use `configs/distill_geometry.yaml` with the existing `scripts/train_distill_stage3.py`, passing the text-phase checkpoint as `paths.lite_checkpoint`. Keep `accelerator=cpu workers=0 limit=2 epochs=1 trainer.audit_updates=true` only for a **two-sample point+box smoke test**, then train normally. Do not promote a smoke checkpoint to a trained model.
+Use `configs/distill_geometry.yaml` with the existing `scripts/train_distill_stage3.py`, passing the text-phase checkpoint as `paths.lite_checkpoint`. **First** run the lightweight input preflight, then the expensive real-model point+box two-sample smoke:
+
+```bash
+python scripts/validate_geometry_inputs.py --official-root "$OFFICIAL" \
+  --dataset-root "$DATA"
+python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
+  --config configs/distill_geometry.yaml \
+  paths.lite_checkpoint=/content/lite50_distillation/text/checkpoint.pt \
+  paths.output=/content/lite50_distillation/geometry_smoke \
+  accelerator=cpu workers=0 limit=2 epochs=1 trainer.audit_updates=true
+```
+
+The mixed batch includes one point-only and one box-only query, with real masks. This is a **two-update integration check**, not convergence or quality evidence. Once the input, optimizer and frozen-state audit pass, remove `limit=2`, use an appropriate training device and independently measure point/box IoU. Advance to fusion1 with `geometry/checkpoints/checkpoint.pt`, **not** the smoke checkpoint.
 
 ## SACap interface
 
