@@ -9,6 +9,7 @@
 | 下载、安装和核验训练数据 | [DATA_V2.md](DATA_V2.md) |
 | 四阶段训练、保存和恢复权重 | [DISTILLATION.md](DISTILLATION.md) |
 | 模型定义 | `lite50/builder.py`、`lite50/modules.py` |
+| 首批 500 张训练及恢复 | `scripts/run_mini500_pilot.py`（已修复分块 BN，非全量配方） |
 | 数据准备及训练脚本 | `scripts/` |
 | 回归测试 | `tests/` |
 | 训练配置 | `configs/distill_geometry.yaml`、`configs/distill_stage3.yaml` |
@@ -20,7 +21,7 @@
 3. **几何蒸馏**：SA-1B 单正点或单框、真实掩码与教师监督。
 4. **Stage 3**：SACap 原始区域文本＋SA-1B 原图和真实掩码；只在 Tokenizer 内按 16 Token 处理，不用旧短语白名单，不运行教师前向。
 
-Stage 3 保持现有官方式配置：训练 RepViT、Projection 和有效 FPN；冻结文本、Fusion、Geometry、解码器和分割头。清理文件不改变结构、损失、可训练参数或数据划分。
+Stage 3 保持现有官方式配置：训练 RepViT、Projection 和有效 FPN；冻结文本、Fusion、Geometry、解码器和分割头。首批测试已修正提示分块的 BN 重复更新；当前证据支持优先排查视觉特征适配，暂不扩大默认 Fusion 解冻范围。详见 [首批测试后的修正](DISTILLATION.md#首批-500-张测试后的修正)。
 
 ## 学生结构
 
