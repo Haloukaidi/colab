@@ -1,80 +1,44 @@
-# EfficientSAM3 RV-M Lite50 — experimental code overlay
+# EfficientSAM3 Lite50
 
-> **Current data entry point (2026-10-14): [DATA_V2.md](DATA_V2.md).** Text KD uses prepared Recap-v3 phrases plus original RefCOCO / RefCOCO+ / RefCOCOg expressions. Default Stage3 uses **original SACap regional captions**, not shortened captions or the historical reviewed-short-phrase whitelist; truncation happens only inside the official ctx16 tokenizer. The older data-specific instructions in DISTILLATION.md are historical where they conflict with DATA_V2.md. Model architecture, losses and the default Stage3 trainable set are unchanged by this data update.
->
-> Delivery status: text and caption manifests have been checked; the mini500 installer and full-scope materializer are supplied. **Do not equate an annotation ZIP with validated full image/mask training data.** Require `DATA_V2_READY.json` for mini500 or a passed `materialization_audit.json` with `training_ready=true` for a materialized SACap scope. The 50-archive scope is the user's fixed sample, not the author's unpublished exact 5% list.
+面向 CPU 推理的研究模型。学生约 **56.41M** 参数；教师为完整 SAM3，初始化来自官方 RV-M。尚未完成正式蒸馏和精度验收，不是已经训练好的模型。
 
-A **research prototype (not a trained checkpoint)** based on [EfficientSAM3](https://github.com/SimonZeng7108/efficientsam3). Current goal: **CPU inference speed versus segmentation accuracy**, retaining text/open-vocabulary and single point/box interfaces; 50M parameters is no longer a hard constraint. Using the pinned upstream commit, the RV-M baseline has 100,828,102 parameters and the student has **56,413,638 parameters**. Mask accuracy has **not** been recovered or validated.
+## 从哪里开始
 
-## Architecture changes
+| 任务 | 入口 |
+|---|---|
+| 下载、安装和核验训练数据 | [DATA_V2.md](DATA_V2.md) |
+| 四阶段训练、保存和恢复权重 | [DISTILLATION.md](DISTILLATION.md) |
+| 模型定义 | `lite50/builder.py`、`lite50/modules.py` |
+| 数据准备及训练脚本 | `scripts/` |
+| 回归测试 | `tests/` |
+| 训练配置 | `configs/distill_geometry.yaml`、`configs/distill_stage3.yaml` |
 
-| Part | RV-M | Lite50 design |
-|---|---|---|
-| Backbone | RepViT-M1.1 | keep |
-| Projection | 512→1024→dense 3×3 1024 | 512→256→DW3×3→1024 |
-| FPN | Transposed convolution + four dense 3×3 convs | projection at low res, bilinear up/downsampling + depthwise-pointwise convs; only the first **three** used scales are executed |
-| Text tokenizer | MobileCLIP-S0 vocabulary (49,408 entries) | unchanged |
-| Text embedding | 49,408×512 | rank-128 factorization with optional SVD initialization (rank-96/64 ablations) |
-| MobileCLIP-S0 attention | 4 transformer layers | 2, keeping first and last |
-| Vision-language fusion encoder | 6 layers | 4 |
-| Geometry encoder | 3 layers | 3 (unchanged; point/box path preserved) |
-| Decoder, segmentation, scoring | original | unchanged |
+## 当前训练方案
 
-The modified Projection, FPN, and rank-128 token embedding reduce the model to **56.41M** actual instantiated parameters (CPU validation; upstream commit `bd0936c788fed8d51fa799437f05abd97b401b06`). Text and fusion layers are also pruned, while all three Geometry Encoder layers and their pretrained weights remain. In the preliminary untrained 2-thread CPU test, Lite50 gave roughly **1.7×** end-to-end speedup compared with the RV-M baseline over a small set of prompts; **this does not establish accuracy or target-device speed**. The unused-FPN optimization below does **not** change the 56.41M parameter count.
+1. **视觉蒸馏**：SA-1B 图片，SAM3 教师特征。
+2. **文本蒸馏**：Recap v3 短语＋RefCOCO／RefCOCO+／RefCOCOg 原始表达，教师和学生接收相同文本，使用官方 16-Token Tokenizer。
+3. **几何蒸馏**：SA-1B 单正点或单框、真实掩码与教师监督。
+4. **Stage 3**：SACap 原始区域文本＋SA-1B 原图和真实掩码；只在 Tokenizer 内按 16 Token 处理，不用旧短语白名单，不运行教师前向。
 
-## v0.2 decisions (2026-10-13)
+Stage 3 保持现有官方式配置：训练 RepViT、Projection 和有效 FPN；冻结文本、Fusion、Geometry、解码器和分割头。清理文件不改变结构、损失、可训练参数或数据划分。
 
-- Default `Lite50Config.text_embedding_rank=128`; optionally test `96` or `64` for ablations.
-- Default `Lite50Config.geometry_layers=3`; the complete original Geometry Encoder and its weights are kept. Reducing it to two layers is an **optional experiment only**, not the default.
-- Input capabilities are **unchanged**: text concept prompts, point prompts, and normalized box prompts. No SAM2 multi-click instance tracker or video module has been added.
-- Projection, FPN, text attention and vision-language encoder modifications are unchanged.
-- No new pretrained weights, end-to-end tests, or quality metrics are provided by these config changes.
-- Rank-128 adds **3,194,880 parameters** relative to rank-64. Current real size 56.41M is acceptable for the CPU speed/accuracy goal. The legacy 50M budget can be enforced explicitly using `strict_budget=True` or `scripts/report.py --strict-budget`.
+## 学生结构
 
-## CPU inference optimization: skip the unused fourth FPN level
+保留 RepViT-M1.1、完整三层 Geometry Encoder、Decoder、Segmentation 和 Scoring；修改 Projection 和 FPN，文本 Embedding 使用 rank-128 分解，文本 Transformer 保留两层，Fusion 保留四层。FPN 注册四个分支以兼容旧权重，只执行前三个有效尺度。
 
-The pinned official model uses `Sam3DualViTDetNeck` with scales `[4, 2, 1, 0.5]`. Its `SAM3VLBackbone` has `scalp=1`: it **computes all four levels**, then discards the last (lowest-resolution) feature and its positional encoding.
+保留文本、单点和单框接口，不增加 SAM2 多轮掩码修正模块。接口可运行不等于精度保留，最终需要独立文本／点框精度与目标 CPU 延迟测试。
 
-The new `lite50/fpn_optimization.py` changes this ordering. `ActiveScaleFPN` computes **only levels 0, 1, 2**; the backbone's `scalp` is set to **0** so they are not truncated twice. The fourth branch remains registered but is never executed. This means:
+## 环境与来源
 
-- Three downstream FPN features, their shapes and expected values remain unchanged; all other input interfaces are untouched.
-- **All v0.2 parameter names, counts and checkpoint keys are retained**: previous `student_initialized.pt` and later v0.2 `state_dict` files should load with `strict=True`.
-- The change is enabled by default with `Lite50Config(skip_unused_fpn_level=True)`. Set `False` to run the unoptimized four-scale baseline and confirm parity.
-- Standalone unit tests validate strict checkpoint compatibility, first-three-feature equality, unchanged parameter count and correct gradient connectivity. **End-to-end raw-output equality and real CPU speedup on the full upstream model still need to be checked in Colab.**
-- The discarded scale only cost a small fraction of end-to-end CPU time in the previous profile. **Do not expect a large speed increase from this change alone.**
+官方仓库：[SimonZeng7108/efficientsam3](https://github.com/SimonZeng7108/efficientsam3)，固定提交 `bd0936c788fed8d51fa799437f05abd97b401b06`。安装官方依赖，再安装本目录的 `requirements-distillation.txt`。
 
-To compare full-model raw outputs (including the 200 unthresholded mask predictions) on the CPU, use the existing initialized v0.2 checkpoint:
-
-```bash
-python scripts/verify_fpn_skip.py \
-  --student-weights /path/to/student_initialized.pt \
-  --image /path/to/test_image.jpg \
-  --modes text point box text_box
-```
-
-## Setup
-
-Clone [EfficientSAM3](https://github.com/SimonZeng7108/efficientsam3), install official requirements, and copy the files in this directory (`lite50/`, `scripts/`, `tests/`) into the checkout. Set `PYTHONPATH="$PWD:$PWD/sam3:$PYTHONPATH"`, then:
+将本目录加入 `PYTHONPATH`，并加入官方仓库及其 `sam3/` 子目录。执行：
 
 ```bash
 python -m unittest discover -s tests -v
-python scripts/report.py --no-svd
-# or load the original RV-M model before structural replacements:
 python scripts/report.py --checkpoint /path/to/efficientsam3_repvit.pt
 ```
 
-To build:
+真实 SAM3 集成测试需要安装完整依赖并设置 `SAM3_ROOT`。未执行的测试不得算作通过。
 
-```python
-from lite50 import build_lite50_image_model
-model = build_lite50_image_model(
-    checkpoint_path="/path/to/original/efficientsam3_repvit.pt",
-    device="cpu",  # speed/accuracy model (~56.41M); strict_budget=False by default
-)
-```
-
-**Training is required**: New projection and FPN weights are not pretrained; MobileCLIP's low-rank embedding is approximate; text and fusion layers have been pruned (Geometry Encoder remains full-size). The fourth-FPN skip itself requires no retraining because the skipped output was already discarded. **Full SAM3 (`sam3.pt`) is the teacher only for Stage1 vision/text and SA-1B geometry KD.** RV-M weights initialize the student. In the **default Stage3**, as in the pinned official RV-M SACap training recipe, the student learns from original SACap **text-only regional prompts and GT box/class/mask losses, with no teacher instantiated**. The trainable set is RepViT + new Projection + active FPN; text, Fusion, Geometry and segmentation heads stay frozen. Progressive Fusion unfreezing and teacher-KD Fusion are separate opt-in experiments. See [DATA_V2.md](DATA_V2.md) for current data and [DISTILLATION.md](DISTILLATION.md) for the training framework and historical experiments. Single-point/box accuracy and multi-point behavior still require held-out evaluation. The previous partial `integration_stage3.py` source patch is retired.
-
-The text interface is `Sam3Processor.set_text_prompt`; box is `Sam3Processor.add_geometric_prompt([cx,cy,w,h], True, state)` (normalized), and point is `Sam3Processor.add_point_prompt([x,y], 1, state)` (pixel coordinates). **The separate optional SAM2 instance-interactive tracker is excluded from the 50M budget**. Do not claim open-vocabulary generalization until evaluated on held-out novel classes.
-
-This overlay is original code inspired by the [official EfficientSAM3](https://github.com/SimonZeng7108/efficientsam3) architecture. Refer to that project's Apache-2.0 license and the separate model-weight licenses.
+模型和数据保留各自上游许可。旧 Fusion/KD 实验配置、SACap 短语白名单读取器及废弃补丁入口已从当前文件树移除；旧版本保留在 Git 历史中。教师缓存、训练审计、模型导出和当前测试继续保留。

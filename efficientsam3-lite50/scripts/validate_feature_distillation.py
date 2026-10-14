@@ -10,7 +10,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--official-root", required=True)
     p.add_argument("--dataset-root", required=True)
-    p.add_argument("--prompt-manifest", required=True)
+    p.add_argument("--text-manifest", help="Defaults to dataset-root/manifests/text_mixed_v2.parquet")
+    p.add_argument("--caption-manifest", help="Optional original SACap caption manifest")
     p.add_argument("--teacher-checkpoint", required=True)
     p.add_argument("--rv-checkpoint", required=True)
     p.add_argument("--output", required=True)
@@ -18,7 +19,8 @@ def main():
     sys.path[:0] = [str(Path(__file__).resolve().parents[1]), args.official_root,
                     str(Path(args.official_root) / "sam3")]
     import torch
-    from lite50.train_data import SACapStage3Dataset, ImageFeatureDataset, TextFeatureDataset
+    from lite50.train_data import ImageFeatureDataset
+    from lite50.data_v2 import TextManifestDataset, RawSACapStage3Dataset
     from sam3.train.data.collator import collate_fn_api
     from lite50.distillation import build_teacher, image_features, image_distillation, text_distillation
     from lite50.stage3 import build_student
@@ -36,14 +38,16 @@ def main():
         (root / "feature_validation.json").write_text(json.dumps(report, indent=2))
     datasets = {}
     for split in ("train", "val"):
-        ds = SACapStage3Dataset(args.dataset_root, args.prompt_manifest, split)
+        ds = RawSACapStage3Dataset(args.dataset_root,
+            caption_manifest=args.caption_manifest, split=split)
         datasets[split] = len(ds)
-        for mode in ("text", "box", "text_box"):
-            ds.prompt_mode = mode
-            batch = collate_fn_api([ds[0]], repeats=1, dict_key="all", with_seg_masks=True)["all"]
-            assert batch.find_targets[0].segments.any()
-            assert tuple(batch.img_batch.shape) == (1, 3, 1008, 1008)
-    record("data", approved_regions=datasets, modes=["text", "box", "text_box"])
+        batch = collate_fn_api([ds[0]], repeats=1, dict_key="all", with_seg_masks=True)["all"]
+        assert batch.find_targets[0].segments.any()
+        assert tuple(batch.img_batch.shape) == (1, 3, 1008, 1008)
+    text_manifest = args.text_manifest or str(Path(args.dataset_root) / "manifests/text_mixed_v2.parquet")
+    text_dataset = TextManifestDataset(text_manifest, split="train")
+    record("data", original_caption_images=datasets, stage3_modes=["text"],
+           text_manifest=text_dataset.data_provenance)
     record("building_teacher")
     teacher = build_teacher(args.teacher_checkpoint)
     teacher_before = fingerprints(teacher)
@@ -65,7 +69,7 @@ def main():
             sf, st = image_features(student, inputs)
             losses = image_distillation(sf, tf, st, tt)
         else:
-            inputs = [TextFeatureDataset(args.dataset_root)[0], "a yellow bus"]
+            inputs = [text_dataset[i] for i in range(min(2, len(text_dataset)))]
             with torch.no_grad():
                 tf = teacher.backbone.forward_text(inputs, device="cpu")
             sf = student.backbone.forward_text(inputs, device="cpu")

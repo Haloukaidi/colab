@@ -54,23 +54,18 @@ class OfficialSupervisedConfigTests(unittest.TestCase):
         self.assertNotIn("language_backbone", pats)
         self.assertNotIn("transformer.encoder", pats)
 
-    def test_kd_and_lite50_fusion_remain_explicit_experiments(self):
+    def test_only_current_geometry_and_supervised_configs_are_published(self):
         import yaml
-        kd = yaml.safe_load((ROOT / "configs/distill_stage3_kd.yaml").read_text())
         geo = yaml.safe_load((ROOT / "configs/distill_geometry.yaml").read_text())
-        fusion = yaml.safe_load(
-            (ROOT / "configs/distill_stage3_fusion_experimental.yaml").read_text()
-        )
-        for c in (kd, geo):
-            self.assertEqual(c["trainer"]["model"]["_target_"],
-                             "lite50.stage3.build_stage3_distiller")
-            self.assertEqual(c["trainer"]["loss"]["all"]["_target_"],
-                             "lite50.stage3.DistillationLoss")
-            self.assertIn("teacher_checkpoint", c["trainer"]["model"])
         self.assertEqual(geo["phase"], "geometry")
-        self.assertEqual(fusion["phase"], "fusion1")
-        self.assertEqual(fusion["trainer"]["model"]["_target_"],
-                         "lite50.stage3.build_stage3_supervised")
+        self.assertEqual(geo["trainer"]["model"]["_target_"],
+                         "lite50.stage3.build_stage3_distiller")
+        self.assertEqual(geo["trainer"]["loss"]["all"]["_target_"],
+                         "lite50.stage3.DistillationLoss")
+        self.assertIn("teacher_checkpoint", geo["trainer"]["model"])
+        self.assertEqual({p.name for p in (ROOT / "configs").glob("*.yaml")},
+                         {"distill_geometry.yaml", "distill_stage3.yaml"})
+        self.assertFalse((ROOT / "scripts/integration_stage3.py").exists())
 
     def test_launcher_enforces_kd_supervision_separation(self):
         code = (ROOT / "scripts/train_distill_stage3.py").read_text()

@@ -1,239 +1,72 @@
-# Lite50 staged distillation
+# Lite50 当前训练顺序
 
-Full **SAM3 (`sam3.pt`) is the frozen teacher**. RV-M
-`efficientsam3_repvit.pt` only initializes the student. This overlay targets
-official commit `bd0936c788fed8d51fa799437f05abd97b401b06`, without modifying
-the official checkout. Smoke tests establish update connectivity, not accuracy.
+本页只描述当前主线。数据位置与验收条件见 [DATA_V2.md](DATA_V2.md)。
 
-## Curriculum
+| 顺序 | 数据 | 更新模块 | 教师 |
+|---|---|---|---|
+| vision | SA-1B 图片 | 新 Projection、有效 FPN | 冻结 SAM3 |
+| text | Recap v3＋RefCOCO 系列表达 | 压缩后的文本编码器 | 冻结 SAM3 |
+| geometry | SA-1B 单正点／单框＋掩码 | Projection、有效 FPN | 冻结 SAM3 |
+| stage3 | SACap 区域原文＋SA-1B 图像／掩码 | RepViT、Projection、有效 FPN | 不构建教师 |
 
-| Phase | Trainable modules |
-|---|---|
-| `vision` | New Projection and active FPN 0/1/2 |
-| `text` | Retained MobileCLIP-S0 text branch, including rank-128 codes and projection |
-| `geometry` | New Projection and active FPN 0/1/2; text and all other modules frozen |
-| `stage3` **(official-style default)** | RepViT backbone, Projection, active FPN 0/1/2; freeze text/Fusion/Geometry/decoder; **GT SACap losses only, no teacher** |
-| `fusion1` **(experimental)** | Projection, FPN 0/1/2, text, last Fusion layer |
-| `fusion2` **(experimental)** | Same, with last 2 Fusion layers |
-| `fusion4` **(experimental)** | Same, with all 4 Fusion layers |
+保持当前默认损失和训练策略。各阶段载入前一阶段完整学生权重，重新创建对应优化器；同阶段恢复才使用 resume。不要把单步测试权重当作训练完成的权重。
 
-RepViT stays frozen during `vision`, `text`, `geometry` and the optional
-Fusion experiments, but is **trainable in the official-style `stage3`**.
-The Geometry Encoder, Transformer Decoder, scoring/segmentation heads and
-unused FPN 3 remain frozen throughout. The Fusion Encoder is frozen in the
-official-style baseline and unfrozen only in named Fusion experiments.
-BatchNorm running statistics remain frozen. Frozen downstream modules remain
-differentiable with respect to trainable upstream activations; only KD teacher
-computation uses `no_grad`.
+## 开始前
 
-The `geometry` phase comes **after text, before Stage3**, matching the official Stage1 Geometry Fine-tuning placement. It trains **one positive point OR one box** on SA-1B ground-truth regions (not repeated clicks and not SAM2 interaction). The official collator's point data are normalized `(x,y,label)`; the Lite50 adapter converts them to real `Prompt.point_embeddings`/`point_labels`/`point_mask` and calls `forward_grounding` directly. Official `SAM3Image.forward` otherwise warns that PCS ignores points. Box and point samples can coexist in the same batch, with an explicit 3-D point padding width rather than the PCS default of 257. The teacher and student receive exactly the same geometry. Supervised GT mask losses, image feature KD, and filtered teacher mask KD remain active. Geometry-only input uses the official `visual` text placeholder.
+安装官方固定提交 `bd0936c788fed8d51fa799437f05abd97b401b06` 及依赖。以下命令在本项目目录运行。准备环境变量：`OFFICIAL` 为官方仓库路径、`DATA` 为通过核验的数据根目录、`SAM3` 为 `sam3.pt`、`RVM` 为 `efficientsam3_repvit.pt`、`OUT` 为新的训练输出目录。
 
-Each phase loads the previous full student checkpoint and builds a fresh
-optimizer. Parameter IDs must exactly cover `requires_grad=True`, without frozen
-or duplicate parameters. Stage3 uses official `construct_optimizer` with an
-explicit allowlist. Default LRs: Projection/FPN 1e-4, text/Fusion 1e-5. These
-are starting settings, not validated convergence hyperparameters. No ViT
-layer-decay rule is applied to RepViT wrappers. Zero-LR groups are rejected.
+首批安装必须通过 `install_mini500_v2.py`，生成 `DATA_V2_READY.json`。5% 的文字标注包不是完整媒体包；`materialize_sacap_scope.py` 必须完成核验后再训练。
 
-## Reused objectives and framework
-
-* Stage1 masked image MSE/cosine and padding-aware text MSE/cosine formulas are
-  preserved in `lite50/distillation.py`, avoiding import-time DDP/global module
-  dependencies of the original entrypoints. Image MSE sums channels, while text
-  MSE averages channels. Image MSE is weighted 0.0015 and cosine 0.1.
-* New FPN outputs also receive mean MSE/cosine supervision, weighted 0.1;
-  trunk distillation alone cannot update FPN. Distilled locations are the
-  post-Projection/teacher ViT trunk `[B,1024,72,72]`, active FPN scales
-  `[B,256,288/144/72,288/144/72]`, and resized text memory `[16,B,256]`.
-* Both models receive the same 1008-square image and SAM3 normalization
-  `(image/255 - .5)/.5`. Square warping has no padding; the image valid mask is
-  all ones. Letterboxing would require changing that mask. Resolution is fixed
-  because the RV-M wrapper interpolates projected features to 72x72.
-* Both text encoders use the official BPE and 16-token context (14 content
-  tokens plus start/end). The full teacher keeps its pretrained position table
-  and shortens its input context. Padding masks must match. Recap uses identical
-  built-in truncation for teacher/student; SACap phrases over budget are errors.
-* Geometry mask KD directly imports upstream `GeometryFinetuningLoss` for
-  BCE + Dice on teacher logits. Predictions are independently Hungarian-matched
-  to the same GT region, never by query index. Only teacher masks with GT IoU
-  >= 0.3 become soft targets. `teacher_mask_pairs=0` means KD was gated off.
-* Stage3 subclasses the actual `sam3.train.trainer.Trainer`, preserving its DDP,
-  epoch loop, AMP option, clipping, optimizer schedulers and checkpoints.
-  Official Box/GIoU, classification/presence and focal/Dice losses remain active.
-  The default **`stage3`** uses only these GT losses. The preceding `geometry`
-  phase and optional `distill_stage3_kd.yaml` still add teacher KD separately.
-* The standalone YAML replaces the absent upstream `base_train.yaml` dependency
-  and incompatible model/data arguments in the pinned Stage3 configurations.
-  The old partial `integration_stage3.py` patch is retired.
-
-## SA-1B geometry interface
-
-`SA1BGeometryStage3Dataset` reads all validated `manifests/geometry.jsonl` rows from mini-v1 (3,647 train, 402 val). Its `point` mode sends exactly one positive foreground point; `box` sends one mask-derived bounding box; `mixed` alternates by sample index and epoch. Official mask decoder, synchronized 1008-square image/mask/point/box transforms, and SAM3 Stage3 collator are reused. These inputs train the point and box *grounding* path only; they do not implement iterative SAM2 mask correction. Positive+negative or multiple points are supported by the lower-level Prompt representation but are not yet covered by this one-point curriculum and require later training/validation.
-
-Use `configs/distill_geometry.yaml` with the existing `scripts/train_distill_stage3.py`, passing the text-phase checkpoint as `paths.lite_checkpoint`. **First** run the lightweight input preflight, then the expensive real-model point+box two-sample smoke:
+## 1. 图像特征蒸馏
 
 ```bash
-python scripts/validate_geometry_inputs.py --official-root "$OFFICIAL" \
-  --dataset-root "$DATA"
-python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
-  --config configs/distill_geometry.yaml \
-  paths.lite_checkpoint=/content/lite50_distillation/text/checkpoint.pt \
-  paths.output=/content/lite50_distillation/geometry_smoke \
-  accelerator=cpu workers=0 limit=2 epochs=1 trainer.audit_updates=true
+python scripts/train_feature_distillation.py \
+  --official-root "$OFFICIAL" --dataset-root "$DATA" \
+  --teacher-checkpoint "$SAM3" --rv-checkpoint "$RVM" \
+  --phase vision --output "$OUT/vision"
 ```
 
-The mixed batch includes one point-only and one box-only query, with real masks. This is a **two-update integration check**, not convergence or quality evidence. Once the input, optimizer and frozen-state audit pass, remove `limit=2`, use an appropriate training device and independently measure point/box IoU. Advance to fusion1 with `geometry/checkpoints/checkpoint.pt`, **not** the smoke checkpoint.
-
-## Official-style supervised Stage3 (default)
-
-The default `configs/distill_stage3.yaml` tracks the pinned official
-`stage3_mixed_sacap_sa1b_rvm_mcs0_seg_img_fpn_99_1_20ep.yaml` **training recipe**:
-RepViT + Projection + FPN trainable, MobileCLIP text, Fusion transformer,
-Geometry Encoder, decoder and scoring frozen; text-only input
-(`use_prompt_boxes: false`); GT box/GIoU, classification/presence,
-mask focal/Dice supervised losses. The Lite50 dataset already has a fixed
-train/validation split, reviewed short texts, and incomplete per-image region
-annotations, so it is **an adaptation of the recipe, not an exact reproduction
-of the official corpus/metrics**. BatchNorm running stats stay fixed.
-Do not change the 16-token tokenizer or architecture.
-
-Crucially the default builder `build_stage3_supervised` **never loads**
-`sam3.pt` or runs teacher image/text inference. Earlier `vision`, `text`
-and `geometry` still use the original SAM3 as the frozen teacher.
-The old teacher-KD Fusion recipe is retained as
-`configs/distill_stage3_kd.yaml` for ablation; gradual Fusion unfreezing
-without teacher is available separately as
-`configs/distill_stage3_fusion_experimental.yaml`, not the baseline.
-
-The pinned official Stage3 *config* requests FPN training but the public
-`stage3/model.py` base wrapper only unfreezes the vision trunk and text;
-Lite50 explicitly enables the active FPN branches so the intended
-`train_vision_fpn: true` setting is actually effective. This should not
-be described as a verbatim run of the upstream code.
-
-## SACap interface
-
-`SACapStage3Dataset` supports native `sacap/{train,val}.parquet` with `imagename`,
-`caption`, and `segments_info=[{anno_id, caption}]`. It joins image stem +
-`anno_id` to the final short-prompt sidecar and original SA-1B JSON. Checks cover
-source captions, fixed split, image path, region ID, exact RLE, positive mask
-area, boxes, image dimensions and token budget. Missing masks are errors; boxes
-are never substituted for masks.
-
-Default eligibility requires `accepted`/`corrected` plus `enabled_for_training`:
-31 training and 14 validation regions in the current sidecar. These were visually
-reviewed by the assistant, not independently human-annotated. Unreviewed automatic
-candidates need explicit `include_unreviewed=true`; held/rejected pairs stay
-excluded. The existing train/val split is preserved.
-
-Each sample is one reviewed region. `prompt_mode=mixed` rotates text, box
-(`visual` placeholder), and text+box by index/epoch. Official transforms update
-image, mask and box together before the official collator. SACap annotations are
-non-exhaustive, so other instances are not automatically negative labels.
-For the **default official-style Stage3**, `prompt_mode=text` (matching the official
-`use_prompt_boxes: false` setting): original Lite50 point and box functionality
-comes from the preceding SA-1B geometry stage. The adapter *can* support
-`text`, `box`, `text_box` for optional experiments, but those are not the
-reference recipe. The ordinary official PCS forward ignores point prompts.
-
-## Colab commands
-
-Use the overlay alongside the pinned official checkout. Install official model
-and training requirements plus `pyarrow`, `pycocotools`, `hydra-core`, `omegaconf`,
-`fvcore`, `tensorboard`, `torchmetrics`, `triton`, `psutil`. The pinned official
-loss module imports Triton even on CPU; its CPU loss computation uses PyTorch.
-spaCy is not required during training.
+## 2. 文本特征蒸馏
 
 ```bash
-OFFICIAL=/content/lite50_v02_validation/official
-OVERLAY=/content/lite50_v02_validation/lite50_source/efficientsam3-lite50
-DATA=/content/lite50_distill_mini_v1
-WEIGHTS='/content/drive/MyDrive/EfficientSAM3压缩/原始权重'
-cd "$OVERLAY"
-
-python scripts/train_feature_distillation.py --official-root "$OFFICIAL" \
-  --dataset-root "$DATA" --teacher-checkpoint "$WEIGHTS/sam3.pt" \
-  --rv-checkpoint "$WEIGHTS/efficientsam3_repvit.pt" --phase vision \
-  --steps 1000 --output /content/lite50_distillation/vision
-
-python scripts/train_feature_distillation.py --official-root "$OFFICIAL" \
-  --dataset-root "$DATA" --teacher-checkpoint "$WEIGHTS/sam3.pt" \
-  --rv-checkpoint "$WEIGHTS/efficientsam3_repvit.pt" --phase text --lr 1e-5 \
-  --lite-checkpoint /content/lite50_distillation/vision/checkpoint.pt \
-  --steps 1000 --output /content/lite50_distillation/text
-
-# SA-1B geometry KD: single positive point and single box, alternating.
-python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
-  --config configs/distill_geometry.yaml \
-  paths.lite_checkpoint=/content/lite50_distillation/text/checkpoint.pt \
-  paths.output=/content/lite50_distillation/geometry epochs=1
-
-# Stage3: official-style SACap text-only supervised GT, no SAM3 teacher process.
-python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
-  paths.lite_checkpoint=/content/lite50_distillation/geometry/checkpoints/checkpoint.pt \
-  paths.output=/content/lite50_distillation/stage3 epochs=1
-
-# OPTIONAL ablation ONLY: progressive Fusion (not official Stage3).
-python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
-  --config configs/distill_stage3_fusion_experimental.yaml \
-  phase=fusion1 paths.lite_checkpoint=/content/lite50_distillation/stage3/checkpoints/checkpoint.pt \
-  paths.output=/content/lite50_distillation/fusion1_exp epochs=1
+python scripts/train_feature_distillation.py \
+  --official-root "$OFFICIAL" --dataset-root "$DATA" \
+  --teacher-checkpoint "$SAM3" --rv-checkpoint "$RVM" \
+  --phase text --text-manifest "$DATA/manifests/text_mixed_v2.parquet" \
+  --lite-checkpoint "$OUT/vision/checkpoint.pt" --output "$OUT/text"
 ```
 
-Step counts/epochs above are examples, not evidence of sufficiency. Advance phases
-after checking held-out masks and forgetting. The provided Stage3 configuration
-is `train_only`; it does not replace a segmentation accuracy benchmark. The default
-small reviewed SACap subset is currently 31 training and 14 validation regions;
-expand verified data before making a generalization claim.
+全量文本也可通过 `--text-manifest` 指定；必须使用相应训练划分。教师和学生看到同一份文本，不复用原长描述生成的教师缓存来监督不同短语。
 
-For CPU smoke tests use `--device cpu` for feature training or
-`accelerator=cpu workers=0 limit=1 trainer.audit_updates=true` for Stage3.
-Full 1008-resolution FP32 teacher/student training requires substantial RAM.
-Frozen teacher weights use strict `assign=True` loading from the memory-mapped
-checkpoint. On CPU this keeps their storage file-backed and reclaimable during
-student backward; freed constructor allocations are also returned to the OS when
-glibc supports `malloc_trim`. CUDA materializes normal device weights. The checkpoint must
-remain available and immutable while that CPU teacher is alive.
-CUDA is the default for real training; AMP is explicit opt-in after validation.
-CPU runs substitute process RSS for the upstream CUDA-only memory meter, through
-a scoped runtime adapter; they do not report RSS as GPU memory.
-They also select the official focal loss's existing PyTorch branch instead of
-its default GPU-only Triton kernel. CUDA runs retain the upstream kernel.
+## 3. 单点／单框几何蒸馏
 
-Optional `trainer.model.teacher_cache_dir=/path/to/cache` caches frozen teacher
-features and raw predictions. Keys include a hash of every teacher weight/buffer,
-official version, context, exact normalized image tensor, text, query mapping,
-boxes, labels and padding masks. GT matching is recomputed after every cache load.
-Augmented inputs produce different keys. Cache files can be large; caching is
-disabled by default. Do not mutate teacher weights within a cache instance.
+```bash
+python scripts/validate_geometry_inputs.py --official-root "$OFFICIAL" --dataset-root "$DATA"
+python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
+  --config configs/distill_geometry.yaml \
+  paths.dataset_root="$DATA" paths.rv_checkpoint="$RVM" paths.teacher_checkpoint="$SAM3" \
+  paths.lite_checkpoint="$OUT/text/checkpoint.pt" paths.output="$OUT/geometry"
+```
 
-## Checkpoints and resume
+几何阶段使用单正点或单框，不做多轮点击。点必须真实进入 Geometry Encoder，不能经忽略点输入的普通 PCS 前向。这个适配由现有代码实现。
 
-Feature checkpoints contain the complete student, optimizer, phase, global step,
-seed and Torch RNG state. `--resume` continues the same phase/dataloader position;
-`--lite-checkpoint` starts a new phase with a fresh optimizer.
-Stage3 retains complete upstream checkpoints (`skip_saving_parameters: []`),
-including student, optimizer, epoch, losses and optional scaler, plus Lite50
-phase/objective/context/commit provenance and teacher identity only for KD. Resume with a different phase is rejected.
-Use a new output directory per phase. The teacher is excluded from student
-checkpoints, and is only required during KD phases (not supervised Stage3).
+## 4. SACap 原文监督微调
 
-Stage3 model keys start with `student.`. `lite50.stage3.build_student` accepts
-both Stage3 and feature checkpoints, strips this prefix and loads strictly.
-For the inference-only builder, export this model's plain `state_dict` first.
-Stage3 resume keeps upstream epoch-boundary semantics, without promising exact
-replay of arbitrary mid-epoch augmentations/dropout. Smoke checkpoints have only
-a few updates and are not trained production models.
+```bash
+python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
+  paths.dataset_root="$DATA" paths.rv_checkpoint="$RVM" \
+  paths.lite_checkpoint="$OUT/geometry/checkpoints/checkpoint.pt" \
+  paths.output="$OUT/stage3"
+```
 
-## Validation
+使用 `RawSACapStage3Dataset`、文本提示和原始区域 caption；超长文字在官方 Tokenizer 内截断，不离线改写。损失使用现有官方框、分类／存在性和 Mask／Dice 监督，不构建 SAM3 教师。
 
-`scripts/validate_feature_distillation.py` checks real teacher/student weights,
-native SACap train/val data and three prompt modes, one image and text update,
-finite/nonzero gradients, active-group changes, frozen state fingerprints, and
-exact feature-checkpoint reload. `trainer.audit_updates=true` adds corresponding
-audits to an actual Stage3 epoch, including full teacher state fingerprints.
-Use `limit=1` for this expensive integration check.
+当前配置的 1 轮是开发默认，不代表正式训练已充分；官方 RV-M 参考实验为 20 轮。50 个归档是用户固定样本，不是作者未公开精确 5% 清单。
 
-Unit tests cover phase policies, missing optimizer coverage, padding gradients,
-independent query matching and gating of inconsistent teacher masks. Executed
-results are recorded separately; code alone is not evidence of passing tests.
+## 必要检查
+
+每阶段检查有限损失、有效梯度、正确优化器覆盖、冻结参数保持不变，以及 checkpoint 严格重新加载。单步更新通过不代表精度恢复。
+
+`validate_feature_distillation.py` 使用当前混合文本和 SACap 原文作数据／更新检查；`validate_geometry_inputs.py` 检查点框数据；`verify_distillation_checkpoints.py` 检查权重。最终在独立数据上测文本分割、单点和单框精度，并在同一目标 CPU 上比较延迟、峰值内存。
+
+训练框架复用官方 Stage 1 特征蒸馏及 Stage 3 Trainer／监督损失；Lite50 构建与数据接口是适配层，不等于作者未公开训练数据与权重的逐字节复现。
