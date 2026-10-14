@@ -11,6 +11,7 @@ the official checkout. Smoke tests establish update connectivity, not accuracy.
 |---|---|
 | `vision` | New Projection and active FPN 0/1/2 |
 | `text` | Retained MobileCLIP-S0 text branch, including rank-128 codes and projection |
+| `geometry` | New Projection and active FPN 0/1/2; text and all other modules frozen |
 | `fusion1` | Projection, FPN 0/1/2, text, last Fusion layer |
 | `fusion2` | Same, with last 2 Fusion layers |
 | `fusion4` | Same, with all 4 Fusion layers |
@@ -19,6 +20,8 @@ RepViT, Geometry Encoder, Transformer Decoder, scoring and segmentation heads,
 and unused FPN 3 remain frozen. Frozen modules stay in evaluation mode, including
 BatchNorm running statistics. Their forward passes remain differentiable with
 respect to trainable upstream features; only teacher computation uses `no_grad`.
+
+The `geometry` phase comes **after text, before fusion1**, matching the official Stage1 Geometry Fine-tuning placement. It trains **one positive point OR one box** on SA-1B ground-truth regions (not repeated clicks and not SAM2 interaction). The official collator's point data are normalized `(x,y,label)`; the Lite50 adapter converts them to real `Prompt.point_embeddings`/`point_labels`/`point_mask` and calls `forward_grounding` directly. Official `SAM3Image.forward` otherwise warns that PCS ignores points. Box and point samples can coexist in the same batch, with an explicit 3-D point padding width rather than the PCS default of 257. The teacher and student receive exactly the same geometry. Supervised GT mask losses, image feature KD, and filtered teacher mask KD remain active. Geometry-only input uses the official `visual` text placeholder.
 
 Each phase loads the previous full student checkpoint and builds a fresh
 optimizer. Parameter IDs must exactly cover `requires_grad=True`, without frozen
@@ -57,6 +60,12 @@ layer-decay rule is applied to RepViT wrappers. Zero-LR groups are rejected.
   and incompatible model/data arguments in the pinned Stage3 configurations.
   The old partial `integration_stage3.py` patch is retired.
 
+## SA-1B geometry interface
+
+`SA1BGeometryStage3Dataset` reads all validated `manifests/geometry.jsonl` rows from mini-v1 (3,647 train, 402 val). Its `point` mode sends exactly one positive foreground point; `box` sends one mask-derived bounding box; `mixed` alternates by sample index and epoch. Official mask decoder, synchronized 1008-square image/mask/point/box transforms, and SAM3 Stage3 collator are reused. These inputs train the point and box *grounding* path only; they do not implement iterative SAM2 mask correction. Positive+negative or multiple points are supported by the lower-level Prompt representation but are not yet covered by this one-point curriculum and require later training/validation.
+
+Use `configs/distill_geometry.yaml` with the existing `scripts/train_distill_stage3.py`, passing the text-phase checkpoint as `paths.lite_checkpoint`. Keep `accelerator=cpu workers=0 limit=2 epochs=1 trainer.audit_updates=true` only for a **two-sample point+box smoke test**, then train normally. Do not promote a smoke checkpoint to a trained model.
+
 ## SACap interface
 
 `SACapStage3Dataset` supports native `sacap/{train,val}.parquet` with `imagename`,
@@ -76,8 +85,7 @@ Each sample is one reviewed region. `prompt_mode=mixed` rotates text, box
 (`visual` placeholder), and text+box by index/epoch. Official transforms update
 image, mask and box together before the official collator. SACap annotations are
 non-exhaustive, so other instances are not automatically negative labels.
-Stage3 point training is not enabled: upstream PCS ignores points, so `point`
-mode is rejected. Inference point support and frozen Geometry weights remain.
+The SACap fusion-stage adapter still uses `text`, `box`, `text_box`. **Point prompting is trained in the preceding SA-1B geometry phase**, because the official PCS training forward ignores points. Inference point support and frozen Geometry weights remain.
 
 ## Colab commands
 
@@ -105,8 +113,15 @@ python scripts/train_feature_distillation.py --official-root "$OFFICIAL" \
   --lite-checkpoint /content/lite50_distillation/vision/checkpoint.pt \
   --steps 1000 --output /content/lite50_distillation/text
 
+# SA-1B geometry KD: single positive point and single box, alternating.
 python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
-  phase=fusion1 paths.lite_checkpoint=/content/lite50_distillation/text/checkpoint.pt \
+  --config configs/distill_geometry.yaml \
+  paths.lite_checkpoint=/content/lite50_distillation/text/checkpoint.pt \
+  paths.output=/content/lite50_distillation/geometry epochs=1
+
+# Then switch to reviewed SACap text/box fusion fine-tuning.
+python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
+  phase=fusion1 paths.lite_checkpoint=/content/lite50_distillation/geometry/checkpoints/checkpoint.pt \
   paths.output=/content/lite50_distillation/fusion1 epochs=1
 
 python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
