@@ -4,10 +4,11 @@
 # No teacher model is constructed. For optional SAM3 KD use distill_stage3_kd.yaml.
 paths:
   dataset_root: /content/lite50_distill_mini_v1
-  prompt_manifest: /content/lite50_text16_v1/sacap_short_prompts.jsonl
+  caption_manifest: null  # default: dataset_root/manifests/sacap_regions.jsonl
+  native_parquet: null  # default: dataset_root/sacap/train.parquet
   rv_checkpoint: /content/drive/MyDrive/EfficientSAM3压缩/原始权重/efficientsam3_repvit.pt
   lite_checkpoint: null  # REQUIRED: output of preceding SA-1B geometry or fusion phase
-  output: /content/lite50_distillation/stage3
+  output: /content/lite50_distillation/data_v2_stage3
 phase: stage3
 resolution: 1008
 epochs: 1
@@ -16,10 +17,10 @@ workers: 2
 batch_size: 1
 limit: null
 prompt_mode: text  # official uses use_prompt_boxes: false
-include_unreviewed: false
+max_segments_per_image: 32  # official regional query cap
 lr_vision: 0.0001
 lr_projection_fpn: 0.0001
-# Keep the distilled text encoder frozen for the small reviewed SACap subset.
+# Text/Fusion stay frozen as in the official SACap Stage3 recipe.
 
 matcher:
   _target_: sam3.train.matcher.BinaryHungarianMatcherV2
@@ -52,13 +53,14 @@ trainer:
     train:
       _target_: sam3.train.data.torch_dataset.TorchDataset
       dataset:
-        _target_: lite50.train_data.SACapStage3Dataset
+        _target_: lite50.data_v2.RawSACapStage3Dataset
         dataset_root: ${paths.dataset_root}
-        prompt_manifest: ${paths.prompt_manifest}
+        caption_manifest: ${paths.caption_manifest}
+        native_parquet: ${paths.native_parquet}
         split: train
         resolution: ${resolution}
         prompt_mode: ${prompt_mode}
-        include_unreviewed: ${include_unreviewed}
+        max_segments_per_image: ${max_segments_per_image}
         limit: ${limit}
       batch_size: ${batch_size}
       num_workers: ${workers}
