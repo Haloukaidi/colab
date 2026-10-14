@@ -12,6 +12,7 @@ def main():
     p.add_argument("--teacher-checkpoint", required=True)
     p.add_argument("--rv-checkpoint", required=True)
     p.add_argument("--lite-checkpoint")
+    p.add_argument("--text-manifest", help="Prepared Recap-v3 + RefCOCO text manifest (text phase only)")
     p.add_argument("--resume")
     p.add_argument("--phase", choices=("vision", "text"), required=True)
     p.add_argument("--output", required=True)
@@ -40,13 +41,22 @@ def main():
     student = build_student(args.rv_checkpoint, args.resume or args.lite_checkpoint, args.phase, args.device)
     teacher = build_teacher(args.teacher_checkpoint, args.device)
     optimizer = build_optimizer(student, args.lr)
-    dataset = (ImageFeatureDataset if args.phase == "vision" else TextFeatureDataset)(args.dataset_root)
+    if args.text_manifest and args.phase != "text":
+        raise ValueError("--text-manifest only applies to text distillation")
+    if args.text_manifest:
+        from lite50.data_v2 import TextManifestDataset
+        dataset = TextManifestDataset(args.text_manifest, split="train")
+    else:
+        dataset = (ImageFeatureDataset if args.phase == "vision" else TextFeatureDataset)(args.dataset_root)
+    data_provenance = getattr(dataset, "data_provenance", None)
     step, seed = 0, args.seed
     if args.resume:
-        step, seed = load_feature_resume(args.resume, student, optimizer, args.phase, args.teacher_checkpoint)
+        step, seed = load_feature_resume(args.resume, student, optimizer, args.phase, args.teacher_checkpoint,
+                                         data_provenance=data_provenance)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     print(json.dumps(parameter_report(student)), flush=True)
+    (out / "data_provenance.json").write_text(json.dumps(data_provenance, indent=2))
     batches = (len(dataset) + args.batch_size - 1) // args.batch_size
     while step < args.steps:
         epoch, offset = divmod(step, batches)
@@ -81,7 +91,7 @@ def main():
             print(json.dumps(record), flush=True)
             if step % args.save_every == 0 or step == args.steps:
                 save_feature_checkpoint(out / "checkpoint.pt", student, optimizer, args.phase,
-                                        step, seed, args.teacher_checkpoint)
+                                        step, seed, args.teacher_checkpoint, data_provenance=data_provenance)
             if step == args.steps:
                 break
 
