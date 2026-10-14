@@ -1,10 +1,10 @@
-# Standalone: upstream bd0936c Stage3 references an absent base_train.yaml.
+# Default EfficientSAM3-style Fusion Stage3: supervise directly from SACap GT.
+# No teacher model is constructed. For optional SAM3 KD use distill_stage3_kd.yaml.
 paths:
   dataset_root: /content/lite50_distill_mini_v1
   prompt_manifest: /content/lite50_text16_v1/sacap_short_prompts.jsonl
   rv_checkpoint: /content/drive/MyDrive/EfficientSAM3压缩/原始权重/efficientsam3_repvit.pt
-  teacher_checkpoint: /content/drive/MyDrive/EfficientSAM3压缩/原始权重/sam3.pt
-  lite_checkpoint: null  # REQUIRED: output of the preceding text/fusion phase
+  lite_checkpoint: null  # REQUIRED: output of preceding SA-1B geometry or fusion phase
   output: /content/lite50_distillation/fusion1
 phase: fusion1
 resolution: 1008
@@ -41,17 +41,11 @@ trainer:
     find_unused_parameters: true
     gradient_as_bucket_view: false
   model:
-    _target_: lite50.stage3.build_stage3_distiller
+    _target_: lite50.stage3.build_stage3_supervised
     rv_checkpoint: ${paths.rv_checkpoint}
-    teacher_checkpoint: ${paths.teacher_checkpoint}
     lite_checkpoint: ${paths.lite_checkpoint}
     phase: ${phase}
     device: cpu
-    image_weight: 1.0
-    text_weight: 1.0
-    mask_kd_weight: 0.5
-    min_teacher_iou: 0.3
-    teacher_cache_dir: null
   data:
     train:
       _target_: sam3.train.data.torch_dataset.TorchDataset
@@ -77,7 +71,7 @@ trainer:
         with_seg_masks: true
   loss:
     all:
-      _target_: lite50.stage3.DistillationLoss
+      _target_: lite50.stage3.SupervisedLoss
       supervised:
         _target_: sam3.train.loss.sam3_loss.Sam3LossWrapper
         normalization: global
