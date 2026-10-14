@@ -149,6 +149,56 @@ def matched_geometry_kd(student_out, teacher_out, targets, min_teacher_iou=0.3):
     return result["total_loss"], len(students)
 
 
+def geometry_prompt_from_find_stage(find_input, require_geometry=False):
+    """Build the real grounding Prompt, including point coordinates and labels.
+
+    The pinned official SAM3Image.forward() warns that PCS input_points are
+    ignored. We call forward_grounding() directly, as Sam3Processor does.
+    The upstream collator stores points as (B, N, 3) = (x_norm,y_norm,label),
+    while GeometryEncoder Prompt expects (N,B,2) and (N,B) labels. Boxes are
+    already sequence-first: (N,B,4).
+    """
+    from sam3.model.geometry_encoders import Prompt
+
+    boxes = find_input.input_boxes
+    box_labels = find_input.input_boxes_label
+    box_mask = find_input.input_boxes_mask
+    if boxes is None or boxes.numel() == 0:
+        boxes = box_labels = box_mask = None
+
+    raw_points = find_input.input_points
+    point_mask = find_input.input_points_mask
+    points = point_labels = None
+    if raw_points is not None and raw_points.numel() > 0:
+        if raw_points.ndim != 3 or raw_points.shape[-1] != 3:
+            raise ValueError(
+                "Expected normalized point input (B,N,3)=(x,y,label); "
+                "use collate_geometry(input_points_embedding_dim=3)"
+            )
+        if point_mask is None or point_mask.shape != raw_points.shape[:2]:
+            raise ValueError("Point padding mask must be (B,N)")
+        points = raw_points[..., :2].transpose(0, 1).contiguous()
+        point_labels = raw_points[..., 2].transpose(0, 1).long().contiguous()
+        valid = ~point_mask.transpose(0, 1)
+        if valid.any():
+            valid_xy, valid_labels = points[valid], point_labels[valid]
+            if (not torch.isfinite(valid_xy).all()
+                    or (valid_xy < 0).any() or (valid_xy > 1).any()
+                    or not torch.all((valid_labels == 0) | (valid_labels == 1))):
+                raise ValueError("Invalid normalized point coordinates or labels")
+
+    if require_geometry:
+        has_boxes = boxes is not None and (box_mask is None or (~box_mask).any())
+        has_points = points is not None and (~point_mask).any()
+        if not has_boxes and not has_points:
+            raise ValueError("Geometry phase requires a real, unmasked point or box prompt")
+
+    return Prompt(
+        box_embeddings=boxes, box_mask=box_mask, box_labels=box_labels,
+        point_embeddings=points, point_mask=point_mask, point_labels=point_labels,
+    )
+
+
 class Lite50Distiller(nn.Module):
     """Stage3-compatible student; the immutable teacher is not checkpointed/DDP-reduced."""
     def __init__(self, student, teacher, image_weight=1.0, text_weight=1.0,
@@ -165,16 +215,15 @@ class Lite50Distiller(nn.Module):
         return self.student.back_convert(target)
 
     def forward(self, batch):
-        from sam3.model.geometry_encoders import Prompt
         from sam3.model.model_misc import SAM3Output
         teacher = self.teacher.to(batch.img_batch.device).eval()
         def compute_teacher():
             tv, tt = image_features(teacher, batch.img_batch)
             tl = teacher.backbone.forward_text(batch.find_text_batch, device=batch.img_batch.device)
             inp = batch.find_inputs[0]
-            tout = teacher.forward_grounding({**tv, **tl}, inp, None,
-                Prompt(box_embeddings=inp.input_boxes, box_mask=inp.input_boxes_mask,
-                       box_labels=inp.input_boxes_label))
+            geo_prompt = geometry_prompt_from_find_stage(
+                inp, require_geometry=getattr(self.student, "_lite50_phase", "") == "geometry")
+            tout = teacher.forward_grounding({**tv, **tl}, inp, None, geo_prompt)
             # Avoid retaining encoder intermediates in the cache.
             tout = {k: tout[k] for k in ("pred_masks", "pred_logits", "pred_boxes", "pred_boxes_xyxy")}
             return tv, tt, tl, tout
@@ -186,9 +235,9 @@ class Lite50Distiller(nn.Module):
         sv, st = image_features(self.student, batch.img_batch)
         sl = self.student.backbone.forward_text(batch.find_text_batch, device=batch.img_batch.device)
         inp = batch.find_inputs[0]
-        out = self.student.forward_grounding({**sv, **sl}, inp, batch.find_targets[0],
-            Prompt(box_embeddings=inp.input_boxes, box_mask=inp.input_boxes_mask,
-                   box_labels=inp.input_boxes_label))
+        geo_prompt = geometry_prompt_from_find_stage(
+            inp, require_geometry=getattr(self.student, "_lite50_phase", "") == "geometry")
+        out = self.student.forward_grounding({**sv, **sl}, inp, batch.find_targets[0], geo_prompt)
         # Evaluation-mode student forward does not compute matching itself.
         if "indices" not in out:
             self.student._compute_matching(out, target)
