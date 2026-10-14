@@ -38,7 +38,7 @@ def cache_key(teacher_signature, batch):
     for name in ("img_ids", "text_ids", "input_boxes", "input_boxes_mask",
                  "input_boxes_label", "input_points", "input_points_mask"):
         digest.update(name.encode())
-        update_tensor_hash(digest, getattr(inp, name))
+        update_tensor_hash(digest, getattr(inp, name, None))
     return digest.hexdigest()
 
 
