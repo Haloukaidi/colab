@@ -17,7 +17,11 @@ def trainable_modules(model, phase):
             count = len(neck.convs) - model.backbone.scalp
         for i in range(count):
             modules[f"fpn{i}"] = neck.convs[i]
-    if phase not in ("vision", "geometry"):
+    # Default supervised Fusion uses a frozen, previously distilled text branch.
+    # Teacher-KD ablations keep the original trainable-text policy.
+    freeze_text = (phase.startswith("fusion") and
+                   getattr(model, "_lite50_supervised_freeze_text", False))
+    if phase not in ("vision", "geometry") and not freeze_text:
         modules["text"] = model.backbone.language_backbone
     if phase.startswith("fusion"):
         count = int(phase[-1])
