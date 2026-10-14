@@ -1,4 +1,4 @@
-"""Launch the upstream Stage3 Trainer with an external, complete Hydra config."""
+"""Launch upstream Stage3 Trainer: supervised Fusion by default, KD by opt-in config."""
 import argparse
 import os
 from pathlib import Path
@@ -20,6 +20,27 @@ def main():
     from hydra.utils import instantiate
     import torch
     cfg = OmegaConf.merge(OmegaConf.load(args.config), OmegaConf.from_dotlist(args.overrides))
+    # Fail before loading any model: the supervised recipe must NEVER
+    # instantiate the full SAM3 teacher, even if someone copied KD settings.
+    builder = str(cfg.trainer.model._target_)
+    loss = str(cfg.trainer.loss.all._target_)
+    if builder == "lite50.stage3.build_stage3_supervised":
+        if loss != "lite50.stage3.SupervisedLoss":
+            raise ValueError("Supervised Stage3 requires SupervisedLoss (no KD terms)")
+        if any(name in cfg.trainer.model for name in (
+            "teacher_checkpoint", "teacher_cache_dir",
+            "image_weight", "text_weight", "mask_kd_weight",
+        )):
+            raise ValueError("Supervised Fusion config must not declare teacher/KD settings")
+        if cfg.phase not in ("fusion1", "fusion2", "fusion4"):
+            raise ValueError("Supervised training only applies to Fusion stages")
+    elif builder == "lite50.stage3.build_stage3_distiller":
+        if loss != "lite50.stage3.DistillationLoss":
+            raise ValueError("Teacher KD requires DistillationLoss")
+        if not cfg.trainer.model.get("teacher_checkpoint"):
+            raise ValueError("Teacher KD needs a trained SAM3 checkpoint")
+    else:
+        raise ValueError(f"Unsupported Lite50 Stage3 model builder: {builder}")
     if not cfg.paths.lite_checkpoint:
         raise ValueError("Set paths.lite_checkpoint to the previous curriculum phase checkpoint")
     if cfg.resolution != 1008:
