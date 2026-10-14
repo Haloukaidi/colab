@@ -12,16 +12,17 @@ the official checkout. Smoke tests establish update connectivity, not accuracy.
 | `vision` | New Projection and active FPN 0/1/2 |
 | `text` | Retained MobileCLIP-S0 text branch, including rank-128 codes and projection |
 | `geometry` | New Projection and active FPN 0/1/2; text and all other modules frozen |
-| `fusion1` | Projection, FPN 0/1/2, text, last Fusion layer |
-| `fusion2` | Same, with last 2 Fusion layers |
-| `fusion4` | Same, with all 4 Fusion layers |
+| `stage3` **(official-style default)** | RepViT backbone, Projection, active FPN 0/1/2; freeze text/Fusion/Geometry/decoder; **GT SACap losses only, no teacher** |
+| `fusion1` **(experimental)** | Projection, FPN 0/1/2, text, last Fusion layer |
+| `fusion2` **(experimental)** | Same, with last 2 Fusion layers |
+| `fusion4` **(experimental)** | Same, with all 4 Fusion layers |
 
 RepViT, Geometry Encoder, Transformer Decoder, scoring and segmentation heads,
 and unused FPN 3 remain frozen. Frozen modules stay in evaluation mode, including
 BatchNorm running statistics. Their forward passes remain differentiable with
 respect to trainable upstream features; only teacher computation uses `no_grad`.
 
-The `geometry` phase comes **after text, before fusion1**, matching the official Stage1 Geometry Fine-tuning placement. It trains **one positive point OR one box** on SA-1B ground-truth regions (not repeated clicks and not SAM2 interaction). The official collator's point data are normalized `(x,y,label)`; the Lite50 adapter converts them to real `Prompt.point_embeddings`/`point_labels`/`point_mask` and calls `forward_grounding` directly. Official `SAM3Image.forward` otherwise warns that PCS ignores points. Box and point samples can coexist in the same batch, with an explicit 3-D point padding width rather than the PCS default of 257. The teacher and student receive exactly the same geometry. Supervised GT mask losses, image feature KD, and filtered teacher mask KD remain active. Geometry-only input uses the official `visual` text placeholder.
+The `geometry` phase comes **after text, before Stage3**, matching the official Stage1 Geometry Fine-tuning placement. It trains **one positive point OR one box** on SA-1B ground-truth regions (not repeated clicks and not SAM2 interaction). The official collator's point data are normalized `(x,y,label)`; the Lite50 adapter converts them to real `Prompt.point_embeddings`/`point_labels`/`point_mask` and calls `forward_grounding` directly. Official `SAM3Image.forward` otherwise warns that PCS ignores points. Box and point samples can coexist in the same batch, with an explicit 3-D point padding width rather than the PCS default of 257. The teacher and student receive exactly the same geometry. Supervised GT mask losses, image feature KD, and filtered teacher mask KD remain active. Geometry-only input uses the official `visual` text placeholder.
 
 Each phase loads the previous full student checkpoint and builds a fresh
 optimizer. Parameter IDs must exactly cover `requires_grad=True`, without frozen
@@ -54,8 +55,9 @@ layer-decay rule is applied to RepViT wrappers. Zero-LR groups are rejected.
   >= 0.3 become soft targets. `teacher_mask_pairs=0` means KD was gated off.
 * Stage3 subclasses the actual `sam3.train.trainer.Trainer`, preserving its DDP,
   epoch loop, AMP option, clipping, optimizer schedulers and checkpoints.
-  Official Box/GIoU, classification/presence and focal/Dice losses remain active;
-  feature KD and gated Geometry mask KD are added to `core_loss`.
+  Official Box/GIoU, classification/presence and focal/Dice losses remain active.
+  The default **`stage3`** uses only these GT losses. The preceding `geometry`
+  phase and optional `distill_stage3_kd.yaml` still add teacher KD separately.
 * The standalone YAML replaces the absent upstream `base_train.yaml` dependency
   and incompatible model/data arguments in the pinned Stage3 configurations.
   The old partial `integration_stage3.py` patch is retired.
@@ -78,6 +80,33 @@ python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
 
 The mixed batch includes one point-only and one box-only query, with real masks. This is a **two-update integration check**, not convergence or quality evidence. Once the input, optimizer and frozen-state audit pass, remove `limit=2`, use an appropriate training device and independently measure point/box IoU. Advance to fusion1 with `geometry/checkpoints/checkpoint.pt`, **not** the smoke checkpoint.
 
+## Official-style supervised Stage3 (default)
+
+The default `configs/distill_stage3.yaml` tracks the pinned official
+`stage3_mixed_sacap_sa1b_rvm_mcs0_seg_img_fpn_99_1_20ep.yaml` **training recipe**:
+RepViT + Projection + FPN trainable, MobileCLIP text, Fusion transformer,
+Geometry Encoder, decoder and scoring frozen; text-only input
+(`use_prompt_boxes: false`); GT box/GIoU, classification/presence,
+mask focal/Dice supervised losses. The Lite50 dataset already has a fixed
+train/validation split, reviewed short texts, and incomplete per-image region
+annotations, so it is **an adaptation of the recipe, not an exact reproduction
+of the official corpus/metrics**. BatchNorm running stats stay fixed.
+Do not change the 16-token tokenizer or architecture.
+
+Crucially the default builder `build_stage3_supervised` **never loads**
+`sam3.pt` or runs teacher image/text inference. Earlier `vision`, `text`
+and `geometry` still use the original SAM3 as the frozen teacher.
+The old teacher-KD Fusion recipe is retained as
+`configs/distill_stage3_kd.yaml` for ablation; gradual Fusion unfreezing
+without teacher is available separately as
+`configs/distill_stage3_fusion_experimental.yaml`, not the baseline.
+
+The pinned official Stage3 *config* requests FPN training but the public
+`stage3/model.py` base wrapper only unfreezes the vision trunk and text;
+Lite50 explicitly enables the active FPN branches so the intended
+`train_vision_fpn: true` setting is actually effective. This should not
+be described as a verbatim run of the upstream code.
+
 ## SACap interface
 
 `SACapStage3Dataset` supports native `sacap/{train,val}.parquet` with `imagename`,
@@ -97,7 +126,11 @@ Each sample is one reviewed region. `prompt_mode=mixed` rotates text, box
 (`visual` placeholder), and text+box by index/epoch. Official transforms update
 image, mask and box together before the official collator. SACap annotations are
 non-exhaustive, so other instances are not automatically negative labels.
-The SACap fusion-stage adapter still uses `text`, `box`, `text_box`. **Point prompting is trained in the preceding SA-1B geometry phase**, because the official PCS training forward ignores points. Inference point support and frozen Geometry weights remain.
+For the **default official-style Stage3**, `prompt_mode=text` (matching the official
+`use_prompt_boxes: false` setting): original Lite50 point and box functionality
+comes from the preceding SA-1B geometry stage. The adapter *can* support
+`text`, `box`, `text_box` for optional experiments, but those are not the
+reference recipe. The ordinary official PCS forward ignores point prompts.
 
 ## Colab commands
 
@@ -131,23 +164,23 @@ python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
   paths.lite_checkpoint=/content/lite50_distillation/text/checkpoint.pt \
   paths.output=/content/lite50_distillation/geometry epochs=1
 
-# Then switch to reviewed SACap text/box fusion fine-tuning.
+# Stage3: official-style SACap text-only supervised GT, no SAM3 teacher process.
 python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
-  phase=fusion1 paths.lite_checkpoint=/content/lite50_distillation/geometry/checkpoints/checkpoint.pt \
-  paths.output=/content/lite50_distillation/fusion1 epochs=1
+  paths.lite_checkpoint=/content/lite50_distillation/geometry/checkpoints/checkpoint.pt \
+  paths.output=/content/lite50_distillation/stage3 epochs=1
 
+# OPTIONAL ablation ONLY: progressive Fusion (not official Stage3).
 python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
-  phase=fusion2 paths.lite_checkpoint=/content/lite50_distillation/fusion1/checkpoints/checkpoint.pt \
-  paths.output=/content/lite50_distillation/fusion2 epochs=1
-
-python scripts/train_distill_stage3.py --official-root "$OFFICIAL" \
-  phase=fusion4 paths.lite_checkpoint=/content/lite50_distillation/fusion2/checkpoints/checkpoint.pt \
-  paths.output=/content/lite50_distillation/fusion4 epochs=1
+  --config configs/distill_stage3_fusion_experimental.yaml \
+  phase=fusion1 paths.lite_checkpoint=/content/lite50_distillation/stage3/checkpoints/checkpoint.pt \
+  paths.output=/content/lite50_distillation/fusion1_exp epochs=1
 ```
 
 Step counts/epochs above are examples, not evidence of sufficiency. Advance phases
 after checking held-out masks and forgetting. The provided Stage3 configuration
-is `train_only`; it does not replace a segmentation accuracy benchmark.
+is `train_only`; it does not replace a segmentation accuracy benchmark. The default
+small reviewed SACap subset is currently 31 training and 14 validation regions;
+expand verified data before making a generalization claim.
 
 For CPU smoke tests use `--device cpu` for feature training or
 `accelerator=cpu workers=0 limit=1 trainer.audit_updates=true` for Stage3.
@@ -177,9 +210,9 @@ seed and Torch RNG state. `--resume` continues the same phase/dataloader positio
 `--lite-checkpoint` starts a new phase with a fresh optimizer.
 Stage3 retains complete upstream checkpoints (`skip_saving_parameters: []`),
 including student, optimizer, epoch, losses and optional scaler, plus Lite50
-phase/teacher/context/commit provenance. Resume with a different phase is rejected.
+phase/objective/context/commit provenance and teacher identity only for KD. Resume with a different phase is rejected.
 Use a new output directory per phase. The teacher is excluded from student
-checkpoints and must remain available.
+checkpoints, and is only required during KD phases (not supervised Stage3).
 
 Stage3 model keys start with `student.`. `lite50.stage3.build_student` accepts
 both Stage3 and feature checkpoints, strips this prefix and loads strictly.
