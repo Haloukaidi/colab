@@ -89,28 +89,23 @@ class Lite50SupervisedModel(nn.Module):
 
 
 def build_stage3_supervised(rv_checkpoint, lite_checkpoint=None,
-                            phase="fusion1", device="cpu",
-                            train_text_in_fusion=False):
-    """Official-style GT supervision; train no SAM3 teacher in Fusion.
+                            phase="stage3", device="cpu"):
+    """Official EfficientSAM3-style GT-supervised Stage3 with no teacher.
 
-    Keep the distilled text backbone frozen by default on tiny SACap splits.
-    Re-enable explicitly for controlled, sufficiently-large-data ablations.
+    The default 'stage3' policy trains the student RepViT trunk, new Projection
+    and active FPN scales. Text, Fusion, Geometry, decoder and scoring freeze,
+    following the official SACap+SA1B RepViT config's intended trainable set.
+    Previously defined fusion1/2/4 are kept as explicit Lite50 experiments.
     """
-    if phase not in ("fusion1", "fusion2", "fusion4"):
-        raise ValueError("Supervised Stage3 phases are fusion1/fusion2/fusion4")
+    if phase not in ("stage3", "fusion1", "fusion2", "fusion4"):
+        raise ValueError("Supervised Stage3 phase must be stage3 or fusion1/fusion2/fusion4")
     if not lite_checkpoint:
         raise ValueError(
             "Supervised Stage3 requires a Lite50 checkpoint from the preceding "
             "text/geometry/fusion phase"
         )
     student = build_student(rv_checkpoint, lite_checkpoint, phase, device)
-    student._lite50_supervised_freeze_text = not bool(train_text_in_fusion)
-    # Re-apply after the builder's generic KD-friendly policy so the optimizer
-    # and frozen module modes agree with this supervised curriculum.
-    apply_train_policy(student, phase)
-    model = Lite50SupervisedModel(student, phase)
-    model.provenance["train_text_in_fusion"] = bool(train_text_in_fusion)
-    return model
+    return Lite50SupervisedModel(student, phase)
 
 class SupervisedLoss(nn.Module):
     """Upstream SAM3 Stage3 box/class/presence/focal-mask/Dice loss only.
