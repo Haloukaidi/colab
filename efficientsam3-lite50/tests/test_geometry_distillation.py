@@ -105,6 +105,26 @@ class PhasePolicyTests(unittest.TestCase):
         self.assertFalse(model.backbone.vision_backbone.convs[3].training)
 
 
+class GeometryTeacherCacheTests(unittest.TestCase):
+    def test_point_position_and_mask_invalidate_teacher_cache(self):
+        from lite50.teacher_cache import cache_key
+        point = torch.tensor([[[.25, .25, 1.]], [[.30, .30, 1.]]])
+        stage = _stage(points=point.clone())
+        stage.img_ids = torch.tensor([0, 1])
+        stage.text_ids = torch.tensor([0, 0])
+        batch = SimpleNamespace(
+            img_batch=torch.zeros(2, 3, 8, 8),
+            find_text_batch=["visual"],
+            find_inputs=[stage],
+        )
+        first = cache_key("sam3-test-sha", batch)
+        stage.input_points[0, 0, 0] += .1
+        self.assertNotEqual(first, cache_key("sam3-test-sha", batch))
+        stage.input_points[0, 0, 0] -= .1
+        stage.input_points_mask[0, 0] = True
+        self.assertNotEqual(first, cache_key("sam3-test-sha", batch))
+
+
 @unittest.skipUnless(os.environ.get("SAM3_ROOT"), "Requires pinned official SAM3 imports")
 class RealGeometryBatchTests(unittest.TestCase):
     def setUp(self):
