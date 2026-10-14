@@ -22,6 +22,8 @@ class SupervisedConfigTests(unittest.TestCase):
         model = config["trainer"]["model"]
         self.assertEqual(model["_target_"], "lite50.stage3.build_stage3_supervised")
         self.assertNotIn("teacher_checkpoint", model)
+        self.assertFalse(model["train_text_in_fusion"])
+        self.assertNotIn("lr_text", config)
         self.assertNotIn("teacher_cache_dir", model)
         self.assertNotIn("mask_kd_weight", model)
         self.assertNotIn("teacher_checkpoint", config["paths"])
@@ -80,19 +82,37 @@ class SupervisedRuntimeTests(unittest.TestCase):
         from lite50.stage3 import build_stage3_supervised
         student = self.FakeStudent()
         with (patch("lite50.stage3.build_student", return_value=student) as build_student,
+              patch("lite50.stage3.apply_train_policy") as apply_policy,
               patch("lite50.stage3.build_teacher",
                     side_effect=AssertionError("Teacher must not be constructed")) as build_teacher):
             model = build_stage3_supervised("rv-m.pt", "geometry.pt", "fusion1", "cpu")
         build_student.assert_called_once()
+        apply_policy.assert_called_once_with(student, "fusion1")
         build_teacher.assert_not_called()
+        self.assertTrue(student._lite50_supervised_freeze_text)
         self.assertFalse(hasattr(model, "teacher"))
         self.assertNotIn("teacher_checkpoint", model.provenance)
         self.assertEqual(model.provenance["objective"], "supervised")
+        self.assertFalse(model.provenance["train_text_in_fusion"])
         self.assertEqual(set(model.state_dict()), {"student.value"})
         tensor = torch.tensor([[[[1.]]]])
         result = model(tensor)
         self.assertTrue(torch.equal(result[0]["pred_masks"], 2 * tensor))
         self.assertEqual(model.back_convert("masks"), {"target": "masks"})
+
+    def test_frozen_text_policy_keeps_fusion_trainable(self):
+        from lite50.train_policy import apply_train_policy
+        from test_distillation import dummy_model
+        model = dummy_model()
+        model._lite50_supervised_freeze_text = True
+        result = apply_train_policy(model, "fusion1")
+        self.assertNotIn("text", result["groups"])
+        self.assertFalse(any(p.requires_grad for p in model.backbone.language_backbone.parameters()))
+        self.assertFalse(model.backbone.language_backbone.training)
+        self.assertTrue(any(p.requires_grad for p in model.transformer.encoder.layers[-1].parameters()))
+        self.assertFalse(any(p.requires_grad for p in model.transformer.encoder.layers[0].parameters()))
+        model.train()
+        self.assertFalse(model.backbone.language_backbone.training)
 
     def test_supervised_loss_uses_only_upstream_ground_truth(self):
         from lite50.stage3 import SupervisedLoss
