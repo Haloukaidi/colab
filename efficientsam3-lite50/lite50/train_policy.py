@@ -2,7 +2,7 @@
 import types
 import torch
 
-PHASES = ("vision", "text", "fusion1", "fusion2", "fusion4")
+PHASES = ("vision", "text", "geometry", "fusion1", "fusion2", "fusion4")
 
 
 def trainable_modules(model, phase):
@@ -17,7 +17,7 @@ def trainable_modules(model, phase):
             count = len(neck.convs) - model.backbone.scalp
         for i in range(count):
             modules[f"fpn{i}"] = neck.convs[i]
-    if phase != "vision":
+    if phase not in ("vision", "geometry"):
         modules["text"] = model.backbone.language_backbone
     if phase.startswith("fusion"):
         count = int(phase[-1])
