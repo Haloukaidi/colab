@@ -89,8 +89,13 @@ class Lite50SupervisedModel(nn.Module):
 
 
 def build_stage3_supervised(rv_checkpoint, lite_checkpoint=None,
-                            phase="fusion1", device="cpu"):
-    """Default Fusion recipe, matching EfficientSAM3's GT-supervised Stage3."""
+                            phase="fusion1", device="cpu",
+                            train_text_in_fusion=False):
+    """Official-style GT supervision; train no SAM3 teacher in Fusion.
+
+    Keep the distilled text backbone frozen by default on tiny SACap splits.
+    Re-enable explicitly for controlled, sufficiently-large-data ablations.
+    """
     if phase not in ("fusion1", "fusion2", "fusion4"):
         raise ValueError("Supervised Stage3 phases are fusion1/fusion2/fusion4")
     if not lite_checkpoint:
@@ -99,8 +104,13 @@ def build_stage3_supervised(rv_checkpoint, lite_checkpoint=None,
             "text/geometry/fusion phase"
         )
     student = build_student(rv_checkpoint, lite_checkpoint, phase, device)
-    return Lite50SupervisedModel(student, phase)
-
+    student._lite50_supervised_freeze_text = not bool(train_text_in_fusion)
+    # Re-apply after the builder's generic KD-friendly policy so the optimizer
+    # and frozen module modes agree with this supervised curriculum.
+    apply_train_policy(student, phase)
+    model = Lite50SupervisedModel(student, phase)
+    model.provenance["train_text_in_fusion"] = bool(train_text_in_fusion)
+    return model
 
 class SupervisedLoss(nn.Module):
     """Upstream SAM3 Stage3 box/class/presence/focal-mask/Dice loss only.
