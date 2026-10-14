@@ -50,8 +50,8 @@ def build_student(rv_checkpoint, lite_checkpoint=None, phase="vision", device="c
 
 def build_stage3_distiller(rv_checkpoint, teacher_checkpoint, lite_checkpoint=None,
                           phase="fusion1", device="cpu", **loss_weights):
-    if phase not in ("fusion1", "fusion2", "fusion4"):
-        raise ValueError("Stage3 phases are fusion1/fusion2/fusion4")
+    if phase not in ("geometry", "fusion1", "fusion2", "fusion4"):
+        raise ValueError("Stage3 phases are geometry/fusion1/fusion2/fusion4")
     student = build_student(rv_checkpoint, lite_checkpoint, phase, device)
     teacher = build_teacher(teacher_checkpoint, device)
     model = Lite50Distiller(student, teacher, **loss_weights)
