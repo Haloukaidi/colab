@@ -1,0 +1,28 @@
+name: Prepare immutable SACap scope captions
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/prepare-sacap-scopes.yml'
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install pyarrow==19.0.1
+      - name: Verify original data and prepare selected raw-caption manifests
+        run: python efficientsam3-lite50/scripts/prepare_sacap_scopes.py --output scope_output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sacap-original-captions-1pct-and-selected5pct
+          path: |
+            scope_output/official1pct/
+            scope_output/selected5pct/
+            scope_output/source_and_scope_audit.json
+          retention-days: 14
