@@ -5,8 +5,10 @@ on:
     paths:
       - '.github/workflows/lite50-data-v2-tests.yml'
       - 'efficientsam3-lite50/lite50/data_v2.py'
-      - 'efficientsam3-lite50/tests/test_data_v2.py'
-      - 'efficientsam3-lite50/scripts/prepare_data_release.py'
+      - 'efficientsam3-lite50/tests/test_data*.py'
+      - 'efficientsam3-lite50/scripts/prepare_*text*.py'
+      - 'efficientsam3-lite50/scripts/materialize_sacap_scope.py'
+      - 'efficientsam3-lite50/scripts/install_mini500_v2.py'
 permissions:
   contents: read
 jobs:
