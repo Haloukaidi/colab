@@ -35,7 +35,8 @@ def cache_key(teacher_signature, batch):
         sort_keys=True).encode())
     update_tensor_hash(digest, batch.img_batch)
     inp = batch.find_inputs[0]
-    for name in ("img_ids", "text_ids", "input_boxes", "input_boxes_mask", "input_boxes_label"):
+    for name in ("img_ids", "text_ids", "input_boxes", "input_boxes_mask",
+                 "input_boxes_label", "input_points", "input_points_mask"):
         digest.update(name.encode())
         update_tensor_hash(digest, getattr(inp, name))
     return digest.hexdigest()
