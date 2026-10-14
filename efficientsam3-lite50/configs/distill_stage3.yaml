@@ -1,23 +1,25 @@
-# Default EfficientSAM3-style Fusion Stage3: supervise directly from SACap GT.
+# Default Lite50 Stage3 based on the pinned official SACap+SA1B RV-M recipe:
+# image trunk + Projection + FPN GT supervision; freeze text, Fusion and heads.
+# Official reference: stage3_mixed_sacap_sa1b_rvm_mcs0_seg_img_fpn_99_1_20ep.yaml.
 # No teacher model is constructed. For optional SAM3 KD use distill_stage3_kd.yaml.
 paths:
   dataset_root: /content/lite50_distill_mini_v1
   prompt_manifest: /content/lite50_text16_v1/sacap_short_prompts.jsonl
   rv_checkpoint: /content/drive/MyDrive/EfficientSAM3压缩/原始权重/efficientsam3_repvit.pt
   lite_checkpoint: null  # REQUIRED: output of preceding SA-1B geometry or fusion phase
-  output: /content/lite50_distillation/fusion1
-phase: fusion1
+  output: /content/lite50_distillation/stage3
+phase: stage3
 resolution: 1008
 epochs: 1
 accelerator: cuda
 workers: 2
 batch_size: 1
 limit: null
-prompt_mode: mixed
+prompt_mode: text  # official uses use_prompt_boxes: false
 include_unreviewed: false
+lr_vision: 0.0001
 lr_projection_fpn: 0.0001
 # Keep the distilled text encoder frozen for the small reviewed SACap subset.
-lr_fusion: 0.00001
 
 matcher:
   _target_: sam3.train.matcher.BinaryHungarianMatcherV2
@@ -45,7 +47,6 @@ trainer:
     rv_checkpoint: ${paths.rv_checkpoint}
     lite_checkpoint: ${paths.lite_checkpoint}
     phase: ${phase}
-    train_text_in_fusion: false  # explicit true only for larger-data ablations
     device: cpu
   data:
     train:
@@ -88,13 +89,15 @@ trainer:
           - _target_: sam3.train.loss.loss_fns.Boxes
             weight_dict: {loss_bbox: 5.0, loss_giou: 2.0}
           - _target_: sam3.train.loss.loss_fns.IABCEMdetr
-            weak_loss: true  # SACap region phrases are not exhaustive class labels
+            weak_loss: false  # match pinned official SACap Stage3 recipe
             weight_dict: {loss_ce: 20.0, presence_loss: 20.0}
             pos_weight: 10.0
             alpha: 0.25
             gamma: 2
             use_presence: true
-            pad_n_queries: 200
+            pos_focal: false
+            pad_n_queries: 128
+            pad_scale_pos: 1.0
           - _target_: sam3.train.loss.loss_fns.Masks
             focal_alpha: 0.25
             focal_gamma: 2.0
@@ -110,10 +113,10 @@ trainer:
     options:
       lr:
         - scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: 0.0}
+        - param_names: ['student.backbone.vision_backbone.trunk.model.backbone.*']
+          scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: '${lr_vision}'}
         - param_names: ['student.backbone.vision_backbone.trunk.model.head.*', 'student.backbone.vision_backbone.convs.*']
           scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: '${lr_projection_fpn}'}
-        - param_names: ['student.transformer.encoder.*']
-          scheduler: {_target_: fvcore.common.param_scheduler.ConstantParamScheduler, value: '${lr_fusion}'}
   checkpoint:
     save_dir: ${paths.output}/checkpoints
     save_freq: 1
