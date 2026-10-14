@@ -1,0 +1,50 @@
+name: Lite50 data-v2 regression audit
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/lite50-data-v2-tests.yml'
+      - 'efficientsam3-lite50/lite50/data_v2.py'
+      - 'efficientsam3-lite50/tests/test_data_v2.py'
+      - 'efficientsam3-lite50/scripts/prepare_data_release.py'
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU-only test dependencies
+        run: |
+          python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install pyarrow==19.0.1 pycocotools==2.0.10 pyyaml numpy pillow ftfy iopath regex
+      - name: Run tests without model weights or private data
+        run: |
+          mkdir -p audit_output
+          set -o pipefail
+          PYTHONPATH=efficientsam3-lite50 python -m unittest discover -s efficientsam3-lite50/tests -v 2>&1 | tee audit_output/unit_tests.log
+      - name: Preserve exact source revisions
+        if: always()
+        run: |
+          git rev-parse HEAD > audit_output/project_commit.txt
+          cp -r efficientsam3-lite50 audit_output/code_snapshot
+          find audit_output -type d -name __pycache__ -prune -exec rm -rf {} +
+          git clone --filter=blob:none --no-checkout https://github.com/SimonZeng7108/efficientsam3.git upstream
+          git -C upstream checkout bd0936c788fed8d51fa799437f05abd97b401b06 -- sam3/sam3 sam3/assets stage1 stage3
+          tar -czf audit_output/official_source.tar.gz -C upstream sam3/sam3 sam3/assets stage1 stage3
+          python - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('audit_output')
+          manifest={str(p.relative_to(root)):{'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in root.rglob('*') if p.is_file()}
+          (root/'SHA256SUMS.json').write_text(json.dumps(manifest,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lite50-data-v2-source-and-tests
+          path: audit_output/
+          retention-days: 14
