@@ -2,7 +2,7 @@
 import types
 import torch
 
-PHASES = ("vision", "text", "geometry", "fusion1", "fusion2", "fusion4")
+PHASES = ("vision", "text", "geometry", "stage3", "fusion1", "fusion2", "fusion4")
 
 
 def trainable_modules(model, phase):
@@ -17,11 +17,11 @@ def trainable_modules(model, phase):
             count = len(neck.convs) - model.backbone.scalp
         for i in range(count):
             modules[f"fpn{i}"] = neck.convs[i]
-    # Default supervised Fusion uses a frozen, previously distilled text branch.
-    # Teacher-KD ablations keep the original trainable-text policy.
-    freeze_text = (phase.startswith("fusion") and
-                   getattr(model, "_lite50_supervised_freeze_text", False))
-    if phase not in ("vision", "geometry") and not freeze_text:
+    if phase == "stage3":
+        # Official SACap+SA1B RepViT recipe: image encoder + projection + FPN.
+        # Text, Fusion transformer, Geometry, decoder and scoring remain frozen.
+        modules["repvit"] = model.backbone.vision_backbone.trunk.model.backbone
+    if phase not in ("vision", "geometry", "stage3"):
         modules["text"] = model.backbone.language_backbone
     if phase.startswith("fusion"):
         count = int(phase[-1])
@@ -53,6 +53,13 @@ def apply_train_policy(model, phase):
         if mode:
             for module in trainable_modules(self, self._lite50_phase).values():
                 module.train(True)
+            if self._lite50_phase == "stage3":
+                # Official SACap recipe sets freeze_vision_batchnorm=true:
+                # prevent RepViT running statistics from drifting.
+                from torch import nn
+                self.backbone.vision_backbone.trunk.model.backbone.apply(
+                    lambda m: m.eval() if isinstance(m, nn.modules.batchnorm._BatchNorm) else None
+                )
             if self._lite50_phase.startswith("fusion"):
                 # Enable the upstream encoder's activation checkpoint wrapper,
                 # without recursively enabling dropout in still-frozen layers.
