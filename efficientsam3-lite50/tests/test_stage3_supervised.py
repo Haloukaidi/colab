@@ -1,7 +1,7 @@
-"""Safety gates for official-style GT-supervised Lite50 Fusion Stage3.
+"""Compare default Lite50 SACap Stage3 with the pinned official RepViT recipe.
 
-Offline config assertions run without the SAM3 package. Full builder/loss tests
-need the pinned official checkout (set SAM3_ROOT and PYTHONPATH as in the repo).
+Offline checks read only YAML; runtime checks require installed official SAM3
+and `SAM3_ROOT` (as for the existing Lite50 smoke tests).
 """
 import os
 from pathlib import Path
@@ -15,58 +15,73 @@ from torch import nn
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class SupervisedConfigTests(unittest.TestCase):
-    def test_default_fusion_has_no_teacher_and_uses_real_masks(self):
+class OfficialSupervisedConfigTests(unittest.TestCase):
+    def test_default_matches_official_sacap_stage3_intent(self):
         import yaml
-        config = yaml.safe_load((ROOT / "configs/distill_stage3.yaml").read_text())
-        model = config["trainer"]["model"]
-        self.assertEqual(model["_target_"], "lite50.stage3.build_stage3_supervised")
+        cfg = yaml.safe_load((ROOT / "configs/distill_stage3.yaml").read_text())
+        self.assertEqual(cfg["phase"], "stage3")
+        self.assertEqual(cfg["prompt_mode"], "text")  # official use_prompt_boxes=false
+        self.assertNotIn("teacher_checkpoint", cfg["paths"])
+        self.assertNotIn("lr_text", cfg)
+        self.assertNotIn("lr_fusion", cfg)
+        self.assertEqual(cfg["trainer"]["model"]["_target_"],
+                         "lite50.stage3.build_stage3_supervised")
+        self.assertEqual(cfg["trainer"]["loss"]["all"]["_target_"],
+                         "lite50.stage3.SupervisedLoss")
+        model = cfg["trainer"]["model"]
         self.assertNotIn("teacher_checkpoint", model)
-        self.assertFalse(model["train_text_in_fusion"])
-        self.assertNotIn("lr_text", config)
-        self.assertNotIn("teacher_cache_dir", model)
-        self.assertNotIn("mask_kd_weight", model)
-        self.assertNotIn("teacher_checkpoint", config["paths"])
-        self.assertEqual(
-            config["trainer"]["loss"]["all"]["_target_"],
-            "lite50.stage3.SupervisedLoss",
-        )
-        supervised = config["trainer"]["loss"]["all"]["supervised"]
-        self.assertEqual(
-            supervised["_target_"], "sam3.train.loss.sam3_loss.Sam3LossWrapper"
-        )
-        loss_types = {item["_target_"] for item in supervised["loss_fns_find"]}
-        self.assertIn("sam3.train.loss.loss_fns.Masks", loss_types)
-        self.assertIn("sam3.train.loss.loss_fns.Boxes", loss_types)
-        self.assertIn("sam3.train.loss.loss_fns.IABCEMdetr", loss_types)
-        self.assertTrue(config["trainer"]["data"]["train"]["collate_fn"]["with_seg_masks"])
-        self.assertEqual(config["trainer"]["data"]["train"]["dataset"]["split"], "train")
+        self.assertNotIn("train_text_in_fusion", model)
+        self.assertTrue(cfg["trainer"]["data"]["train"]["collate_fn"]["with_seg_masks"])
+        self.assertEqual(cfg["trainer"]["data"]["train"]["dataset"]["split"], "train")
+        sup = cfg["trainer"]["loss"]["all"]["supervised"]
+        self.assertEqual(sup["_target_"], "sam3.train.loss.sam3_loss.Sam3LossWrapper")
+        funcs = {x["_target_"]: x for x in sup["loss_fns_find"]}
+        self.assertIn("sam3.train.loss.loss_fns.Masks", funcs)
+        self.assertIn("sam3.train.loss.loss_fns.Boxes", funcs)
+        cls = funcs["sam3.train.loss.loss_fns.IABCEMdetr"]
+        self.assertFalse(cls["weak_loss"])
+        self.assertFalse(cls["pos_focal"])
+        self.assertEqual(cls["pad_n_queries"], 128)
+        self.assertEqual(cls["pad_scale_pos"], 1.0)
+        masks = funcs["sam3.train.loss.loss_fns.Masks"]["weight_dict"]
+        self.assertEqual(masks["loss_mask"], 200.0)
+        self.assertEqual(masks["loss_dice"], 10.0)
+        sched = cfg["trainer"]["optim"]["options"]["lr"]
+        pats = " ".join(" ".join(x.get("param_names", [])) for x in sched)
+        self.assertIn("student.backbone.vision_backbone.trunk.model.backbone.*", pats)
+        self.assertIn("student.backbone.vision_backbone.trunk.model.head.*", pats)
+        self.assertIn("student.backbone.vision_backbone.convs.*", pats)
+        self.assertNotIn("language_backbone", pats)
+        self.assertNotIn("transformer.encoder", pats)
 
-    def test_previous_kd_config_is_preserved_as_explicit_ablation(self):
+    def test_kd_and_lite50_fusion_remain_explicit_experiments(self):
         import yaml
         kd = yaml.safe_load((ROOT / "configs/distill_stage3_kd.yaml").read_text())
         geo = yaml.safe_load((ROOT / "configs/distill_geometry.yaml").read_text())
-        for cfg in (kd, geo):
-            self.assertEqual(
-                cfg["trainer"]["model"]["_target_"],
-                "lite50.stage3.build_stage3_distiller",
-            )
-            self.assertEqual(
-                cfg["trainer"]["loss"]["all"]["_target_"],
-                "lite50.stage3.DistillationLoss",
-            )
-            self.assertIn("teacher_checkpoint", cfg["trainer"]["model"])
+        fusion = yaml.safe_load(
+            (ROOT / "configs/distill_stage3_fusion_experimental.yaml").read_text()
+        )
+        for c in (kd, geo):
+            self.assertEqual(c["trainer"]["model"]["_target_"],
+                             "lite50.stage3.build_stage3_distiller")
+            self.assertEqual(c["trainer"]["loss"]["all"]["_target_"],
+                             "lite50.stage3.DistillationLoss")
+            self.assertIn("teacher_checkpoint", c["trainer"]["model"])
         self.assertEqual(geo["phase"], "geometry")
+        self.assertEqual(fusion["phase"], "fusion1")
+        self.assertEqual(fusion["trainer"]["model"]["_target_"],
+                         "lite50.stage3.build_stage3_supervised")
 
-    def test_default_launcher_uses_supervised_recipe(self):
+    def test_launcher_enforces_kd_supervision_separation(self):
         code = (ROOT / "scripts/train_distill_stage3.py").read_text()
-        self.assertIn('configs/distill_stage3.yaml', code)
+        self.assertIn("configs/distill_stage3.yaml", code)
         self.assertIn('builder == "lite50.stage3.build_stage3_supervised"', code)
         self.assertIn('"teacher_checkpoint", "teacher_cache_dir"', code)
 
 
-@unittest.skipUnless(os.environ.get("SAM3_ROOT"), "Requires pinned official SAM3 training dependencies")
-class SupervisedRuntimeTests(unittest.TestCase):
+@unittest.skipUnless(os.environ.get("SAM3_ROOT"),
+                     "Requires pinned official SAM3 training dependencies")
+class OfficialSupervisedRuntimeTests(unittest.TestCase):
     class FakeStudent(nn.Module):
         def __init__(self):
             super().__init__()
@@ -78,78 +93,69 @@ class SupervisedRuntimeTests(unittest.TestCase):
         def back_convert(self, target):
             return {"target": target}
 
-    def test_build_model_never_loads_sam3_teacher(self):
+    def test_build_model_never_instantiates_teacher(self):
         from lite50.stage3 import build_stage3_supervised
         student = self.FakeStudent()
         with (patch("lite50.stage3.build_student", return_value=student) as build_student,
-              patch("lite50.stage3.apply_train_policy") as apply_policy,
               patch("lite50.stage3.build_teacher",
-                    side_effect=AssertionError("Teacher must not be constructed")) as build_teacher):
-            model = build_stage3_supervised("rv-m.pt", "geometry.pt", "fusion1", "cpu")
-        build_student.assert_called_once()
-        apply_policy.assert_called_once_with(student, "fusion1")
+                    side_effect=AssertionError("Unexpected SAM3 teacher")) as build_teacher):
+            model = build_stage3_supervised("rv-m.pt", "geometry.pt", "stage3", "cpu")
+        build_student.assert_called_once_with("rv-m.pt", "geometry.pt", "stage3", "cpu")
         build_teacher.assert_not_called()
-        self.assertTrue(student._lite50_supervised_freeze_text)
         self.assertFalse(hasattr(model, "teacher"))
-        self.assertNotIn("teacher_checkpoint", model.provenance)
         self.assertEqual(model.provenance["objective"], "supervised")
-        self.assertFalse(model.provenance["train_text_in_fusion"])
+        self.assertNotIn("teacher_checkpoint", model.provenance)
         self.assertEqual(set(model.state_dict()), {"student.value"})
-        tensor = torch.tensor([[[[1.]]]])
-        result = model(tensor)
-        self.assertTrue(torch.equal(result[0]["pred_masks"], 2 * tensor))
-        self.assertEqual(model.back_convert("masks"), {"target": "masks"})
+        batch = torch.ones(1, 1, 1, 1)
+        self.assertTrue(torch.equal(model(batch)[0]["pred_masks"], 2 * batch))
+        self.assertEqual(model.back_convert("x"), {"target": "x"})
 
-    def test_frozen_text_policy_keeps_fusion_trainable(self):
-        from lite50.train_policy import apply_train_policy
+    def test_official_phase_trains_vision_trunk_projection_fpn_only(self):
         from test_distillation import dummy_model
+        from lite50.train_policy import apply_train_policy, build_optimizer, assert_optimizer_coverage
         model = dummy_model()
-        model._lite50_supervised_freeze_text = True
-        result = apply_train_policy(model, "fusion1")
-        self.assertNotIn("text", result["groups"])
+        report = apply_train_policy(model, "stage3")
+        self.assertEqual(set(report["groups"]),
+                         {"repvit", "projection", "fpn0", "fpn1", "fpn2"})
+        self.assertTrue(any(p.requires_grad for p in model.backbone.vision_backbone.trunk.model.backbone.parameters()))
+        self.assertTrue(any(p.requires_grad for p in model.backbone.vision_backbone.trunk.model.head.parameters()))
         self.assertFalse(any(p.requires_grad for p in model.backbone.language_backbone.parameters()))
-        self.assertFalse(model.backbone.language_backbone.training)
-        self.assertTrue(any(p.requires_grad for p in model.transformer.encoder.layers[-1].parameters()))
-        self.assertFalse(any(p.requires_grad for p in model.transformer.encoder.layers[0].parameters()))
-        model.train()
-        self.assertFalse(model.backbone.language_backbone.training)
+        self.assertFalse(any(p.requires_grad for p in model.transformer.encoder.parameters()))
+        self.assertFalse(any(p.requires_grad for p in model.geometry_encoder.parameters()))
+        self.assertFalse(any(p.requires_grad for p in model.segmentation_head.parameters()))
+        self.assertFalse(any(p.requires_grad for p in model.backbone.vision_backbone.convs[3].parameters()))
+        self.assertFalse(model.backbone.vision_backbone.trunk.model.backbone[1].training)
+        model.eval().train()
+        self.assertFalse(model.backbone.vision_backbone.trunk.model.backbone[1].training)
+        assert_optimizer_coverage(model, build_optimizer(model))
 
-    def test_supervised_loss_uses_only_upstream_ground_truth(self):
+    def test_supervised_loss_uses_only_official_gt_loss(self):
         from lite50.stage3 import SupervisedLoss
 
-        class FakeUpstreamLoss(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.calls = 0
-
-            def forward(self, outputs, targets):
-                self.calls += 1
+        class FakeGT(nn.Module):
+            def forward(self, outputs, target):
                 masks = next(iter(outputs))["pred_masks"]
-                return {"core_loss": (masks - targets).square().mean(),
+                return {"core_loss": (masks - target).square().mean(),
                         "loss_mask": masks.abs().mean()}
 
-        original = FakeUpstreamLoss()
-        loss_fn = SupervisedLoss(supervised=original)
-        predicted = torch.tensor([[[[2.]]]], requires_grad=True)
-        result = loss_fn([{"pred_masks": predicted}], torch.tensor([[[[1.]]]]))
-        self.assertEqual(original.calls, 1)
+        out = torch.tensor([[[[2.0]]]], requires_grad=True)
+        result = SupervisedLoss(FakeGT())(
+            [{"pred_masks": out}], torch.tensor([[[[1.0]]]])
+        )
         self.assertEqual(set(result), {"core_loss", "loss_mask"})
-        self.assertAlmostEqual(result["core_loss"].item(), 1.0)
         result["core_loss"].backward()
-        self.assertTrue(torch.equal(predicted.grad, torch.ones_like(predicted) * 2))
+        self.assertTrue(torch.equal(out.grad, torch.full_like(out, 2.0)))
 
-    def test_supervised_loss_refuses_accidental_kd_outputs(self):
-        from lite50.stage3 import SupervisedLoss
-        loss_fn = SupervisedLoss(supervised=nn.Identity())
+    def test_supervised_rejects_kd_and_missing_checkpoints(self):
+        from lite50.stage3 import SupervisedLoss, build_stage3_supervised
         with self.assertRaisesRegex(ValueError, "KD predictions"):
-            loss_fn([{"pred_masks": torch.ones(1), "lite50_kd": {}}], None)
-
-    def test_supervised_builder_requires_previous_checkpoint_and_fusion_stage(self):
-        from lite50.stage3 import build_stage3_supervised
+            SupervisedLoss(nn.Identity())(
+                [{"pred_masks": torch.ones(1), "lite50_kd": {}}], None
+            )
         with self.assertRaisesRegex(ValueError, "requires a Lite50 checkpoint"):
-            build_stage3_supervised("rv.pt", None, "fusion1")
-        with self.assertRaisesRegex(ValueError, "fusion1/fusion2/fusion4"):
-            build_stage3_supervised("rv.pt", "prior.pt", "geometry")
+            build_stage3_supervised("rv.pt", None, "stage3")
+        with self.assertRaisesRegex(ValueError, "stage3 or fusion1"):
+            build_stage3_supervised("rv.pt", "some.pt", "geometry")
 
 
 if __name__ == "__main__":
